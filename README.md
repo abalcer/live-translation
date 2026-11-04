@@ -29,7 +29,7 @@
 ## Встановлення
 
 ```bash
-git clone https://github.com/<your-username>/live-translation.git
+git clone https://github.com/abalcer/live-translation.git
 cd live-translation
 ./setup_env.sh
 source .venv/bin/activate
