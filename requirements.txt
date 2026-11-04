@@ -37,7 +37,7 @@ f5-tts>=0.6.2            # fast MLX/PyTorch zero-shot cloning (recommended on M-
 TTS>=0.22.0              # Coqui XTTSv2 - PyTorch/MPS backend, broader language coverage
 kokoro>=0.9.4            # Kokoro-82M - small neural TTS, no cloning, built-in voices
 
-# ---- Cloud alternative: Gemini Live API (gemini_live_translate.py) -----------
+# ---- Cloud alternative: Gemini Live API (gemini_translate.py) -----------
 # Self-contained capture->translate->speak via Google's realtime API.
 # Not needed for the local main.py pipeline.
 google-genai>=1.0.0

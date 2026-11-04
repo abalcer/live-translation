@@ -128,9 +128,11 @@ paths:
 # ==============================================================================
 # Gemini Live API - synchronous (simultaneous) speech translation.
 #
-# Used ONLY by gemini_live_translate.py, which is a self-contained alternative
-# to the local STT->LLM->TTS pipeline above: a single bidirectional stream to
-# Google's Live API does capture->translate->speak end to end.
+# Reserved for gemini_translate.py, a self-contained alternative to the local
+# STT->LLM->TTS pipeline above: a single bidirectional stream to Google's Live
+# API does capture->translate->speak end to end.
+# NOTE: gemini_translate.py does NOT read this section yet - its model, target
+# language and devices are currently hardcoded in the script.
 #
 #   [BlackHole 2ch]  --capture 16kHz--> Gemini Live --speak 24kHz--> [BlackHole 16ch]
 #
