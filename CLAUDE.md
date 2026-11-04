@@ -9,7 +9,7 @@
 
 Дві незалежні реалізації:
 - **`main.py`** — локальний конвеєр: Silero VAD → mlx-whisper → Ollama → TTS із клонуванням голосу.
-- **`gemini_translate.py`** — хмарна альтернатива: один потік Gemini Live API (`gemini-3.5-live-translate-preview`). Вона не імпортує нічого з `src/` і не читає `config.yaml`: модель, мова (`en`) і пристрої задані прямо в коді.
+- **`gemini_translate.py`** — хмарна альтернатива: один потік Gemini Live API (`gemini-3.5-live-translate-preview`). Читає `config.yaml → gemini:` (через `src.utils.load_config`), прапорці CLI мають пріоритет. Аудіо через PyAudio (не sounddevice), з власним потоковим `LinearResampler` 24 кГц → частота вихідного пристрою. Виводить у BlackHole 2ch, тоді як `main.py` — у BlackHole 16ch.
 
 ## Команди
 
@@ -18,6 +18,7 @@
 source .venv/bin/activate
 python main.py                          # локальний конвеєр
 python gemini_translate.py              # Gemini Live (потрібен GEMINI_API_KEY у .env)
+python gemini_translate.py --list-devices   # аудіопристрої; --target/--model/--input-device/--output-device перекривають config.yaml
 python tts_test.py "текст"              # тест TTS/клонування без мікрофона, VAD і STT
 python tts_test.py --translate "текст"  # спершу переклад через Ollama, потім TTS
 python3 -c "import sounddevice as sd; print(sd.query_devices())"   # назви аудіопристроїв
