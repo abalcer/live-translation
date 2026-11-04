@@ -1,0 +1,171 @@
+# ==============================================================================
+# live-translation configuration
+#
+# One-way audio routing (mic -> Meet only, see gemini_translate.py for the
+# cloud alternative):
+#
+#   [You speak RU/UA] --mic--> AudioCapture(outgoing_mic_to_meet)
+#         -> VAD -> STT -> Ollama(ru/ua->en) -> TTS clone(your voice)
+#         -> AudioPlayer --> "BlackHole 16ch"  <-- set as Meet's MICROPHONE
+#                                                    (remote party hears EN, in your voice)
+#
+# Required one-time macOS setup (see setup_env.sh for details):
+#   1. Install BlackHole 16ch (Homebrew cask).
+#   2. In Google Meet, set Microphone = "BlackHole 16ch".
+# ==============================================================================
+
+audio:
+  sample_rate: 16000        # working rate for capture / VAD / STT
+  channels: 1
+  blocksize: 512             # samples per capture callback (~32ms @16kHz)
+  dtype: "float32"
+
+  # Logical name -> actual CoreAudio device name (substring match, case-insensitive).
+  # NOTE: device names are whatever macOS reports for your system language/locale
+  # (e.g. "Мікрофон MacBook Pro" instead of "MacBook Pro Microphone" on a
+  # Ukrainian-locale Mac) - verify yours with:
+  #   python3 -c "import sounddevice as sd; print(sd.query_devices())"
+  devices:
+    mic_input: "Мікрофон MacBook Pro"
+    meet_output: "BlackHole 16ch"
+
+# ------------------------------------------------------------------------------
+# Translation routes. Each route wires one input device through the
+# VAD -> STT -> LLM -> (TTS -> output) pipeline. Add more routes here later
+# if you also need the reverse (Meet -> you) direction.
+#
+#   speak: true  (default) - synthesize the translation in your cloned voice
+#                            and play it to output_device.
+#   speak: false           - stop after the LLM step; the translated text is
+#                            printed to the console only (no TTS, no playback,
+#                            output_device is ignored).
+# ------------------------------------------------------------------------------
+routes:
+  - name: outgoing_mic_to_meet
+    enabled: true
+    speak: true
+    input_device: mic_input
+    output_device: meet_output
+    voice_reference: "reference/reference_speaker.wav"   # your cloned voice
+    voice_reference_text: ""                              # optional, auto-transcribed if empty
+
+vad:
+  sampling_rate: 16000
+  window_size_samples: 512        # Silero's native chunk size at 16kHz - do not change without changing sample_rate
+  threshold: 0.5                   # speech probability trigger (0..1)
+  min_speech_duration_ms: 250
+  min_silence_duration_ms: 350     # silence required to close/finalize an utterance
+  max_speech_duration_s: 15        # force-cut runaway utterances
+  speech_pad_ms: 200                # padding added around detected speech
+
+stt:
+  engine: "mlx_whisper"
+  # "mlx-community/whisper-large-v3-turbo" - best accuracy/speed tradeoff on M-series.
+  # Swap to "mlx-community/whisper-medium-mlx" for lower latency at slightly lower accuracy.
+  model: "mlx-community/whisper-large-v3-turbo"
+  language_auto_detect: true
+  languages: ["ru", "ua", "en"]           # used as a hint / fallback when auto-detect is off
+  temperature: 0.0
+  condition_on_previous_text: false  # keep utterances independent -> lower latency, no drift
+
+translation:
+  engine: "ollama"
+  endpoint: "http://localhost:11434/api/generate"
+  model: "qwen2.5:7b-instruct"   # only model currently pulled (`ollama list`);
+                                  # `ollama pull qwen3.5:9b` first if you want that one instead
+  timeout_s: 60
+  temperature: 0.1
+  num_predict: 256
+  keep_alive: "30m"                  # keep the model resident in memory between calls
+  direction_map:
+    ru: en
+    ua: en
+
+tts:
+  engine: "say"                      # "f5_tts" | "xtts_v2" | "say" | "kokoro"
+  device: "mps"                       # Metal Performance Shaders backend (f5_tts/xtts_v2/kokoro)
+  sample_rate: 24000                  # F5-TTS/Kokoro native output rate (XTTSv2/say output is resampled to match)
+  speed: 0.6
+  # F5-TTS denoising steps: cost scales ~linearly with this. 16 is the
+  # library's "balanced" default but is too slow for live interpretation on
+  # MPS (measured ~5s for a 2-word phrase). 8 roughly halves TTS latency;
+  # drop to 4-6 for more speed at a noticeable quality cost, or raise back
+  # toward 16-32 if you have latency budget to spare and want cleaner audio.
+  nfe_step: 8
+  cross_fade_duration_s: 0.1
+  seed: null                         # F5-TTS sampling seed; null = random each call.
+                                     # Kept in [0, 2**32-1] so it can't corrupt
+                                     # PYTHONHASHSEED for child processes.
+  xtts:
+    model_name: "tts_models/multilingual/multi-dataset/xtts_v2"
+  say:
+    # macOS built-in Speech Synthesis - no voice cloning, no reference audio,
+    # ~0.5-1s per phrase (vs ~3-5s for f5_tts/xtts_v2). List installed voices
+    # with `say -v ?`.
+    voice: "Jamie (Enhanced)"         # en_GB, male
+    rate: 190                        # words per minute
+  kokoro:
+    # Kokoro-82M - open-weight neural TTS, no cloning, no reference audio.
+    # Full voice list: https://huggingface.co/hexgrad/Kokoro-82M/tree/main/voices
+    # (am_* = American male, bm_* = British male, af_*/bf_* = female).
+    lang_code: "a"                    # 'a' = American English (matches am_* voices)
+    voice: "am_michael"               # male
+    speed: 1.0
+
+pipeline:
+  max_queue_size: 8
+  log_level: "INFO"
+  worker_threads:
+    stt: 1          # keep at 1: a single Metal/MPS context should not be hit concurrently
+    translation: 2   # Ollama can comfortably serve a couple of concurrent requests
+    tts: 1           # keep at 1 for the same reason as stt
+
+paths:
+  models_dir: "models"
+  reference_dir: "reference"
+  logs_dir: "logs"
+
+# ==============================================================================
+# Gemini Live API - synchronous (simultaneous) speech translation.
+#
+# Used ONLY by gemini_live_translate.py, which is a self-contained alternative
+# to the local STT->LLM->TTS pipeline above: a single bidirectional stream to
+# Google's Live API does capture->translate->speak end to end.
+#
+#   [BlackHole 2ch]  --capture 16kHz--> Gemini Live --speak 24kHz--> [BlackHole 16ch]
+#
+# Auth: export GEMINI_API_KEY=...   (https://aistudio.google.com/apikey)
+# ==============================================================================
+gemini:
+  # Two modes, chosen automatically by the model name:
+  #   *live-translate*  -> dedicated streaming-translation model (lowest latency,
+  #                        driven by target_language_code only; voice / prompt
+  #                        below are ignored).
+  #   anything else      -> conversational Live model steered into an interpreter
+  #                        role by the system prompt; `voice` applies.
+  # Alternatives for this account:
+  #   gemini-3.1-flash-live-preview
+  #   gemini-2.5-flash-native-audio-preview-12-2025
+  model: "gemini-3.5-live-translate-preview"
+
+  input_device: "BlackHole 2ch"      # audio to translate (substring match)
+  output_device: "BlackHole 16ch"    # where the spoken translation is played
+  output_channels: 1                 # 1 = feed channel 0 only; 2 = duplicate to L/R
+
+  input_sample_rate: 16000           # required by the Live API
+  output_sample_rate: 24000          # Live API audio output rate
+  capture_blocksize: 800             # ~50ms per chunk @ 16kHz
+
+  target_language_code: "uk-UA"      # BCP-47; live-translate mode uses the short
+                                     # form ("uk"), prompt mode uses it as-is
+  echo_target_language: true         # live-translate: parrot speech that is
+                                     # already in the target language
+  voice: "Charon"                    # prompt mode only: Puck | Charon | Kore | Fenrir | Aoede | ...
+
+  source_language: "англійською"     # prompt mode only (instrumental case)
+  target_language: "українською"     # prompt mode only
+
+  show_transcripts: true             # print heard / spoken text to the console
+  # Full override of the interpreter instruction (prompt mode only). Leave empty
+  # to use the built-in template.
+  system_instruction: ""

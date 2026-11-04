@@ -1,0 +1,29 @@
+# Секрети
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Логи та згенероване аудіо
+logs/*
+!logs/.gitkeep
+*.wav
+
+# Завантажені моделі
+models/*
+!models/.gitkeep
+
+# Особистий зразок голосу (біометричні дані — не публікувати)
+reference/*
+!reference/.gitkeep
+
+# Локальні налаштування Claude Code
+.claude/

@@ -1,0 +1,47 @@
+# ==============================================================================
+# Live RU<->EN translation + voice cloning pipeline - Python dependencies
+# Target: macOS, Apple Silicon (M-series), Python 3.11
+# ==============================================================================
+
+# ---- Core ---------------------------------------------------------------
+numpy>=1.26,<2.0
+PyYAML>=6.0.1
+requests>=2.31.0
+
+# ---- Audio I/O & routing --------------------------------------------------
+# sounddevice (PortAudio bindings) is the primary capture/playback backend
+# used by src/audio_stream.py. PyAudio is kept as an alternative/fallback
+# backend as requested by the spec - not imported by default.
+sounddevice>=0.4.6
+PyAudio>=0.2.14
+soundfile>=0.12.1
+scipy>=1.11.0          # used for high-quality resampling between device / model rates
+
+# ---- VAD (Voice Activity Detection) ---------------------------------------
+silero-vad>=5.1.2
+torch>=2.2.0            # required by silero-vad and by the XTTSv2 backend
+
+# ---- STT: mlx-whisper (Apple Silicon / Metal via MLX) ----------------------
+mlx>=0.18.0
+mlx-whisper>=0.4.0
+
+# ---- LLM translation client -------------------------------------------------
+# Ollama itself runs as a separate local server (installed via setup_env.sh);
+# `requests` above is the only client dependency needed.
+
+# ---- TTS ------------------------------------------------------------------
+# Pick ONE engine via config.yaml -> tts.engine ("f5_tts" | "xtts_v2" | "say" | "kokoro").
+# All are listed so you can switch without re-installing. "say" needs no
+# extra package (macOS built-in).
+f5-tts>=0.6.2            # fast MLX/PyTorch zero-shot cloning (recommended on M-series)
+TTS>=0.22.0              # Coqui XTTSv2 - PyTorch/MPS backend, broader language coverage
+kokoro>=0.9.4            # Kokoro-82M - small neural TTS, no cloning, built-in voices
+
+# ---- Cloud alternative: Gemini Live API (gemini_live_translate.py) -----------
+# Self-contained capture->translate->speak via Google's realtime API.
+# Not needed for the local main.py pipeline.
+google-genai>=1.0.0
+python-dotenv>=1.0.0     # loads GEMINI_API_KEY from .env
+
+# ---- Misc utilities ----------------------------------------------------------
+tqdm>=4.66.0
