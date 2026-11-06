@@ -47,6 +47,14 @@ source .venv/bin/activate
 OLLAMA_MODEL=llama3.1:8b-instruct-q4_K_M ./setup_env.sh
 ```
 
+Модель, яку використовує конвеєр, задається в `config.yaml → translation.model`.
+Щоб порівняти швидкість і якість кількох моделей на однаковому наборі фраз (з тим самим промптом, що й у конвеєрі):
+
+```bash
+python bench_translate.py qwen2.5:7b-instruct gemma3:12b qwen3:14b
+python bench_translate.py -f phrases.txt -n 3 gemma3:12b   # власні фрази, по рядку
+```
+
 ## Налаштування звуку
 
 1. Перевірте назви аудіопристроїв:
@@ -221,6 +229,7 @@ python gemini_translate.py --model <назва-моделі>      # інша м�
 ├── main.py               # локальний конвеєр перекладу
 ├── gemini_translate.py   # хмарна альтернатива (Gemini Live)
 ├── tts_test.py           # тестування синтезу / клонування голосу
+├── bench_translate.py    # порівняння моделей перекладу (затримка та якість)
 ├── config.yaml           # усі налаштування
 ├── setup_env.sh          # встановлення залежностей
 ├── CLAUDE.md             # інструкції для Claude Code

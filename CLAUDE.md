@@ -21,6 +21,7 @@ python gemini_translate.py              # Gemini Live (потрібен GEMINI_A
 python gemini_translate.py --list-devices   # аудіопристрої; --target/--model/--input-device/--output-device перекривають config.yaml
 python tts_test.py "текст"              # тест TTS/клонування без мікрофона, VAD і STT
 python tts_test.py --translate "текст"  # спершу переклад через Ollama, потім TTS
+python bench_translate.py model1 model2 # затримка й якість перекладу кількох моделей Ollama на однакових фразах
 python3 -c "import sounddevice as sd; print(sd.query_devices())"   # назви аудіопристроїв
 ```
 
