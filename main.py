@@ -5,7 +5,10 @@ routed through BlackHole virtual audio devices into Google Meet.
 Pipeline per route:
 
     capture -> VAD -> STT (mlx-whisper) -> LLM translate (Ollama)
-            -> TTS (voice clone) -> playback
+            -> TTS (voice clone) -> [RVC voice conversion] -> playback
+
+The RVC stage is optional (config.yaml tts.voice_conversion.enabled) and runs
+in the same TTS worker thread, right after synthesis.
 
 Stages run as independent asyncio tasks connected by asyncio.Queue, so while
 utterance N is being synthesized, utterance N+1 is already being
@@ -30,6 +33,7 @@ from src.translator import Translator
 from src.tts_cloner import VoiceCloner
 from src.utils import LatencyTracker, load_config, setup_logging
 from src.vad_processor import Utterance, VADProcessor
+from src.voice_converter import VoiceConverter
 
 logger = logging.getLogger("live-translation.main")
 
@@ -74,6 +78,7 @@ class Pipeline:
         self.transcriber = Transcriber(cfg)
         self.translator = Translator(cfg)
         self.voice_cloner = VoiceCloner(cfg, transcribe_fn=self.transcriber.transcribe)
+        self.voice_converter = VoiceConverter.from_config(cfg)
 
         self._stt_executor = ThreadPoolExecutor(
             max_workers=cfg.pipeline.worker_threads.stt, thread_name_prefix="stt"
@@ -90,6 +95,10 @@ class Pipeline:
         if self._any_speaking:
             self.voice_cloner.load()
             self._warmup_tts()
+            if self.voice_converter is not None:
+                # The worker warms itself up (rmvpe, FAISS index, Metal kernels)
+                # before reporting ready.
+                self.voice_converter.load()
         else:
             logger.info("All routes are text-only (speak: false) - skipping TTS model load.")
         logger.info("All models ready.")
@@ -210,6 +219,16 @@ class Pipeline:
                 logger.exception("[%s] TTS failed on utterance #%d", item.route, item.utterance_id)
                 continue
             item.tracker.mark("tts")
+            if self.voice_converter is not None and audio.size:
+                try:
+                    audio = await loop.run_in_executor(
+                        self._tts_executor, self.voice_converter.convert, audio
+                    )
+                except Exception:
+                    # Better to be heard in the plain TTS voice than not at all.
+                    logger.exception("[%s] RVC failed on utterance #%d - playing unconverted TTS",
+                                     item.route, item.utterance_id)
+                item.tracker.mark("vc")
             if audio.size:
                 self.players[item.route].play(audio)
             logger.info(item.tracker.report(extra=f'"{item.text}"'))
@@ -236,6 +255,8 @@ class Pipeline:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self.stop_audio()
+        if self.voice_converter is not None:
+            self.voice_converter.close()
         self._stt_executor.shutdown(wait=False)
         self._tts_executor.shutdown(wait=False)
 

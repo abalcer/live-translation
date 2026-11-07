@@ -64,7 +64,10 @@ class LatencyTracker:
         [outgoing_mic_to_meet#17] VAD  612ms | STT  171ms | LLM   94ms | TTS  308ms | TOTAL  573ms | "Привет, как дела?"
 
     Timeline recorded:
-        created -> vad -> stt -> llm -> tts
+        created -> vad -> stt -> llm -> tts [-> vc]
+
+    - "vc" is only stamped when RVC voice conversion is enabled
+      (tts.voice_conversion); the VC column and TOTAL then include it.
 
     - "created" is stamped when speech onset is first detected by the VAD.
     - "vad"     is stamped when the VAD confirms end-of-speech (utterance ready).
@@ -93,14 +96,17 @@ class LatencyTracker:
         stt_ms = self._delta_ms("vad", "stt")
         llm_ms = self._delta_ms("stt", "llm")
         tts_ms = self._delta_ms("llm", "tts")
-        total_ms = self._delta_ms("vad", "tts")
+        last = "vc" if "vc" in self._t else "tts"
+        total_ms = self._delta_ms("vad", last)
         parts = [
             f"VAD {vad_ms:6.0f}ms",
             f"STT {stt_ms:6.0f}ms",
             f"LLM {llm_ms:6.0f}ms",
             f"TTS {tts_ms:6.0f}ms",
-            f"TOTAL {total_ms:6.0f}ms",
         ]
+        if last == "vc":
+            parts.append(f"VC {self._delta_ms('tts', 'vc'):6.0f}ms")
+        parts.append(f"TOTAL {total_ms:6.0f}ms")
         line = f"[{self.route}#{self.utterance_id}] " + " | ".join(parts)
         if extra:
             line += f" | {extra}"

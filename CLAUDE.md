@@ -21,6 +21,8 @@ python gemini_translate.py              # Gemini Live (потрібен GEMINI_A
 python gemini_translate.py --list-devices   # аудіопристрої; --target/--model/--input-device/--output-device перекривають config.yaml
 python tts_test.py "текст"              # тест TTS/клонування без мікрофона, VAD і STT
 python tts_test.py --translate "текст"  # спершу переклад через Ollama, потім TTS
+python tts_test.py --no-vc "text"       # те саме без RVC (для порівняння)
+./setup_rvc.sh                          # встановити Applio для RVC у vendor/applio (опційно)
 python bench_translate.py model1 model2 # затримка й якість перекладу кількох моделей Ollama на однакових фразах
 python3 -c "import sounddevice as sd; print(sd.query_devices())"   # назви аудіопристроїв
 ```
@@ -33,7 +35,7 @@ python3 -c "import sounddevice as sd; print(sd.query_devices())"   # назви 
 Кожен маршрут із `config.yaml → routes` — окремий конвеєр з асинхронних задач, з'єднаних через `asyncio.Queue`:
 
 ```
-AudioCapture → VADProcessor → [Utterance] → STT → [SttResult] → Translate → [TranslateResult] → TTS → AudioPlayer
+AudioCapture → VADProcessor → [Utterance] → STT → [SttResult] → Translate → [TranslateResult] → TTS → [RVC] → AudioPlayer
 ```
 
 - Блокуючі виклики моделей виконуються в `ThreadPoolExecutor` (`pipeline.worker_threads`).
@@ -44,6 +46,9 @@ AudioCapture → VADProcessor → [Utterance] → STT → [SttResult] → Transl
 - `src/translator.py` — HTTP-запит до Ollama `/api/generate`; напрям перекладу береться з `translation.direction_map`.
 - `src/tts_cloner.py` — `VoiceCloner` з рушіями `f5_tts` | `xtts_v2` (клонують голос) і `say` | `kokoro` (без клонування).
   Для F5-TTS потрібен транскрипт зразка: якщо `voice_reference_text` порожній, він береться з `reference/<ім'я>.txt`, а якщо файлу немає — генерується через STT і зберігається туди ж.
+- `src/voice_converter.py` — опційний етап RVC (`tts.voice_conversion.enabled`): замінює тембр виходу будь-якого рушія TTS на голос користувача.
+  Applio має несумісні з `.venv` залежності, тому модель працює в окремому процесі `src/rvc_worker.py` під `vendor/applio/.venv` (cwd = `vendor/applio`), обмін — сирі float32 через stdin/stdout за протоколом із `src/rvc_protocol.py`.
+  `rvc_worker.py` не можна імпортувати з основного конвеєра: він залежить лише від stdlib, numpy, `rvc_protocol` і Applio. Тому `rvc_protocol.py` теж має залежати лише від stdlib і numpy. Applio закріплено на коміті в `setup_rvc.sh`; воркер використовує його внутрішні API (`Pipeline.pipeline`, кешування FAISS), тож оновлення Applio треба перевіряти.
 - `src/utils.py` — `load_config` (повертає `DotDict` з доступом через атрибути), логування, `LatencyTracker` (затримка на кожному етапі), `resample`.
 - Під час старту `main.py` «прогріває» кожен голосовий зразок, щоб перша фраза не чекала на завантаження.
 
@@ -55,7 +60,7 @@ AudioCapture → VADProcessor → [Utterance] → STT → [SttResult] → Transl
 
 ## Правила
 
-- **Ніколи не комітити** `.env`, `reference/` (зразок голосу користувача — біометричні дані), `logs/`, `models/`, `*.wav`. Усе це вже є в `.gitignore`.
+- **Ніколи не комітити** `.env`, `reference/` (зразок голосу користувача — біометричні дані), `logs/`, `models/` (зокрема модель RVC з голосом користувача), `vendor/`, `*.wav`. Усе це вже є в `.gitignore`.
 - Документація для користувача (`README.md`) пишеться українською, коментарі в коді — як у файлі, який редагуєш: у `src/`, `main.py` і `config.yaml` англійською, у `gemini_translate.py` українською.
 - Додаючи новий TTS-рушій, оновлюй `VoiceCloner.load()` і `synthesize()`, коментар `tts.engine` у `config.yaml` і таблицю в README.
 - Код орієнтований лише на macOS/Apple Silicon (MLX, MPS, CoreAudio, BlackHole). Сумісність з іншими платформами не потрібна.

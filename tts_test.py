@@ -40,6 +40,7 @@ Common options:
     --nfe-step N       F5-TTS denoising steps override (quality/speed knob)
     --speed X          speaking rate override
     --per-line         synthesize each non-empty line separately
+    --no-vc            skip RVC voice conversion even if tts.voice_conversion.enabled
     --out PATH         output WAV path (default: logs/tts_test_<ts>.wav)
     --no-save          play straight to the speaker, do not write a WAV file
     --no-play          do not play the result through the speakers (write file only)
@@ -58,6 +59,7 @@ import numpy as np
 import soundfile as sf
 
 from src.tts_cloner import VoiceCloner
+from src.voice_converter import VoiceConverter
 from src.utils import load_config, setup_logging
 
 
@@ -130,7 +132,8 @@ def build_cloner(cfg, args) -> VoiceCloner:
 
 
 def synthesize(cloner, text: str, lang: str, ref: str, ref_text: str,
-               per_line: bool, sample_rate: int) -> np.ndarray:
+               per_line: bool, sample_rate: int,
+               converter: VoiceConverter | None = None) -> np.ndarray:
     segments = [text]
     if per_line:
         segments = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -143,7 +146,12 @@ def synthesize(cloner, text: str, lang: str, ref: str, ref_text: str,
         dt = time.perf_counter() - t0
         dur = len(wav) / sample_rate if len(wav) else 0.0
         rtf = dt / dur if dur else float("nan")
-        print(f"  [{i}/{len(segments)}] {dt:5.2f}s synth -> {dur:5.2f}s audio "
+        vc_note = ""
+        if converter is not None and len(wav):
+            t1 = time.perf_counter()
+            wav = converter.convert(wav)
+            vc_note = f" + {time.perf_counter() - t1:5.2f}s RVC"
+        print(f"  [{i}/{len(segments)}] {dt:5.2f}s synth{vc_note} -> {dur:5.2f}s audio "
               f"(RTF {rtf:.2f})  | {seg[:70]}")
         if len(wav):
             chunks.append(wav)
@@ -190,6 +198,8 @@ def main() -> None:
     p.add_argument("--nfe-step", type=int, help="Override F5-TTS nfe_step.")
     p.add_argument("--speed", type=float, help="Override tts.speed.")
     p.add_argument("--per-line", action="store_true", help="Synthesize each line separately.")
+    p.add_argument("--no-vc", action="store_true",
+                   help="Skip RVC voice conversion even if tts.voice_conversion.enabled.")
     p.add_argument("--out", help="Output WAV path (default: logs/tts_test_<timestamp>.wav).")
     p.add_argument("--no-save", action="store_true",
                    help="Do not write a WAV file; play straight to the speaker.")
@@ -220,8 +230,19 @@ def main() -> None:
 
     cloner = build_cloner(cfg, args)
 
+    converter = None if args.no_vc else VoiceConverter.from_config(cfg)
+    if converter is not None:
+        vc_cfg = cfg.tts.voice_conversion
+        print(f"RVC voice conversion: {vc_cfg.model} (index_rate={vc_cfg.get('index_rate')})")
+        converter.load()
+
     t0 = time.perf_counter()
-    wav = synthesize(cloner, text, lang, ref, args.ref_text, args.per_line, sample_rate)
+    try:
+        wav = synthesize(cloner, text, lang, ref, args.ref_text, args.per_line,
+                         sample_rate, converter)
+    finally:
+        if converter is not None:
+            converter.close()
     total = time.perf_counter() - t0
 
     if not len(wav):

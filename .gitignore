@@ -27,3 +27,6 @@ reference/*
 
 # Локальні налаштування Claude Code
 .claude/
+
+# Optional RVC backend (Applio checkout + its own venv + ~600 MB weights), see setup_rvc.sh
+vendor/

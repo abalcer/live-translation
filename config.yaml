@@ -89,7 +89,8 @@ translation:
     ua: en
 
 tts:
-  engine: "say"                      # "f5_tts" | "xtts_v2" | "say" | "kokoro"
+  engine: "kokoro"                   # "f5_tts" | "xtts_v2" | "say" | "kokoro"
+                                     # (plain `say`: engine "say" + voice_conversion.enabled false)
   device: "mps"                       # Metal Performance Shaders backend (f5_tts/xtts_v2/kokoro)
   sample_rate: 24000                  # F5-TTS/Kokoro native output rate (XTTSv2/say output is resampled to match)
   speed: 0.6
@@ -118,6 +119,27 @@ tts:
     lang_code: "a"                    # 'a' = American English (matches am_* voices)
     voice: "am_michael"               # male
     speed: 1.0
+  voice_conversion:
+    # Optional RVC stage applied to the output of ANY engine above:
+    #   TTS (native EN pronunciation) -> RVC (your timbre) -> playback
+    # RVC keeps words/pronunciation/intonation of the TTS and swaps only the
+    # timbre, learned from your recordings (any language) and trained in
+    # Applio. Runs in a separate process under Applio's own venv - install
+    # it once with ./setup_rvc.sh. Adds ~0.25-0.8s per 1-12s phrase on MPS
+    # (the "VC" column in the latency log); ~15s one-off warm-up at startup.
+    enabled: true
+    applio_dir: "vendor/applio"
+    python: ""                        # "" = <applio_dir>/.venv/bin/python
+    model: "models/my_voice.pth"
+    index: "models/my_voice.index"   # "" = no index (index_rate is then ignored)
+    pitch: 0                          # semitones; 0 = TTS voice F0 already matches yours
+                                      # (am_michael ~112 Hz vs your ~113 Hz)
+    index_rate: 0.3                   # 0..1: pull towards the training-set timbre;
+                                      # 0.3 sounded closest in the listening test
+    protect: 0.33                     # 0..0.5: keep consonants/breaths from the TTS
+    volume_envelope: 1.0              # 1 = loudness contour of the RVC output
+    f0_method: "rmvpe"
+    embedder: "contentvec"            # must match the embedder the model was trained with
 
 pipeline:
   max_queue_size: 8
