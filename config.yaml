@@ -151,6 +151,16 @@ tts:
     lang_code: "a"                    # 'a' = American English (matches am_* voices)
     voice: "am_michael"               # male
     speed: 1.0
+  adaptive_speed:
+    # Speak faster while translations are queued up (the QUEUE column), back
+    # to normal once caught up. At speed 1.0 the English TTS of a translation
+    # ran ~1.5x longer than the Russian source, so continuous speech built a
+    # backlog of 15+ s within a minute. Multiplies kokoro.speed / say.rate /
+    # tts.speed (f5_tts); xtts_v2 ignores it. Shown as SPEED in the log.
+    enabled: true
+    start_s: 2.0                      # queued seconds where speeding up begins (factor 1.0)
+    full_s: 8.0                       # queued seconds where max_factor is reached
+    max_factor: 1.3                   # Kokoro stays intelligible up to ~1.3-1.35
   voice_conversion:
     # Optional RVC stage applied to the output of ANY engine above:
     #   TTS (native EN pronunciation) -> RVC (your timbre) -> playback

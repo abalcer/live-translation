@@ -121,14 +121,20 @@ class VoiceCloner:
         return text
 
     # ---- synthesis --------------------------------------------------------
-    def synthesize(self, text: str, lang: str, reference_wav: str, reference_text: str = "") -> np.ndarray:
+    def synthesize(self, text: str, lang: str, reference_wav: str, reference_text: str = "",
+                   speed_factor: float = 1.0) -> np.ndarray:
+        """
+        `speed_factor` multiplies the configured speaking rate of the engine
+        (used by main.py to catch up when translations queue up). XTTSv2
+        ignores it.
+        """
         if not text.strip():
             return np.zeros(0, dtype=np.float32)
 
         if self.engine_name == "say":
-            return self._synthesize_say(text)
+            return self._synthesize_say(text, speed_factor)
         if self.engine_name == "kokoro":
-            return self._synthesize_kokoro(text)
+            return self._synthesize_kokoro(text, speed_factor)
 
         if not Path(reference_wav).exists():
             raise FileNotFoundError(
@@ -137,10 +143,10 @@ class VoiceCloner:
             )
 
         if self.engine_name == "f5_tts":
-            return self._synthesize_f5(text, reference_wav, reference_text)
+            return self._synthesize_f5(text, reference_wav, reference_text, speed_factor)
         return self._synthesize_xtts(text, lang, reference_wav)
 
-    def _synthesize_say(self, text: str) -> np.ndarray:
+    def _synthesize_say(self, text: str, speed_factor: float = 1.0) -> np.ndarray:
         import soundfile as sf
 
         say_cfg = self.cfg.tts.say
@@ -151,7 +157,7 @@ class VoiceCloner:
                 [
                     "say",
                     "-v", say_cfg.voice,
-                    "-r", str(say_cfg.rate),
+                    "-r", str(round(say_cfg.rate * speed_factor)),
                     "-o", out_path,
                     "--file-format=WAVE",
                     f"--data-format=LEI16@{self.sample_rate}",
@@ -171,11 +177,11 @@ class VoiceCloner:
             wav = resample(wav, sr, self.sample_rate)
         return wav.astype(np.float32, copy=False)
 
-    def _synthesize_kokoro(self, text: str) -> np.ndarray:
+    def _synthesize_kokoro(self, text: str, speed_factor: float = 1.0) -> np.ndarray:
         kokoro_cfg = self.cfg.tts.kokoro
         parts = [
             chunk.audio.numpy()
-            for chunk in self._engine(text, voice=kokoro_cfg.voice, speed=kokoro_cfg.speed)
+            for chunk in self._engine(text, voice=kokoro_cfg.voice, speed=kokoro_cfg.speed * speed_factor)
         ]
         audio = parts[0] if len(parts) == 1 else np.concatenate(parts)
         audio = audio.astype(np.float32, copy=False)
@@ -186,7 +192,8 @@ class VoiceCloner:
             audio = resample(audio, kokoro_native_rate, self.sample_rate)
         return audio
 
-    def _synthesize_f5(self, text: str, reference_wav: str, reference_text: str) -> np.ndarray:
+    def _synthesize_f5(self, text: str, reference_wav: str, reference_text: str,
+                       speed_factor: float = 1.0) -> np.ndarray:
         from src.utils import resample
 
         ref_text = self._reference_text_for(reference_wav, reference_text)
@@ -202,7 +209,7 @@ class VoiceCloner:
             ref_file=reference_wav,
             ref_text=ref_text,
             gen_text=text,
-            speed=self.cfg.tts.speed,
+            speed=self.cfg.tts.speed * speed_factor,
             nfe_step=self.cfg.tts.nfe_step,
             cross_fade_duration=self.cfg.tts.cross_fade_duration_s,
             seed=int(seed) & _MAX_HASH_SEED,

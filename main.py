@@ -223,11 +223,14 @@ class Pipeline:
         while True:
             item = await self.translate_out_queue.get()
             rcfg = self._route_cfg[item.route]
+            player = self.players[item.route]
+            speed = self._speed_factor(player.queued_seconds)
             try:
                 audio = await loop.run_in_executor(
                     self._tts_executor,
                     self.voice_cloner.synthesize,
                     item.text, item.lang, rcfg["voice_reference"], rcfg.get("voice_reference_text", ""),
+                    speed,
                 )
             except Exception:
                 logger.exception("[%s] TTS failed on utterance #%d", item.route, item.utterance_id)
@@ -243,17 +246,34 @@ class Pipeline:
                     logger.exception("[%s] RVC failed on utterance #%d - playing unconverted TTS",
                                      item.route, item.utterance_id)
                 item.tracker.mark("vc")
-            player = self.players[item.route]
             # Translation still playing ahead of this phrase = extra delay the
             # listener waits on top of TOTAL. Growing values mean you speak
             # faster than the translation can be voiced.
             ahead_s = player.queued_seconds
             if audio.size:
                 player.play(audio)
-            logger.info(item.tracker.report(extra=f'QUEUE {ahead_s:4.1f}s | "{item.text}"'))
+            logger.info(item.tracker.report(
+                extra=f'QUEUE {ahead_s:4.1f}s | SPEED {speed:.2f}x | "{item.text}"'))
             if ahead_s > self.cfg.pipeline.get("queue_warn_s", 8.0):
                 logger.warning("[%s] translation is %.1fs behind - pause briefly to let it catch up",
                                item.route, ahead_s)
+
+    def _speed_factor(self, queued_s: float) -> float:
+        """
+        Speaking-rate multiplier for the next phrase, from how much translation
+        is still waiting to be played. English TTS of a translation runs ~1.5x
+        longer than the Russian source at speed 1.0, so continuous speech piles
+        up a backlog; like a human interpreter, speak faster while behind and
+        return to the normal pace once caught up. Linear from 1.0 at
+        tts.adaptive_speed.start_s to max_factor at full_s.
+        """
+        ad = self.cfg.tts.get("adaptive_speed") or {}
+        if not ad.get("enabled"):
+            return 1.0
+        start, full = float(ad.get("start_s", 2.0)), float(ad.get("full_s", 8.0))
+        top = float(ad.get("max_factor", 1.3))
+        ratio = min(1.0, max(0.0, (queued_s - start) / max(full - start, 1e-6)))
+        return 1.0 + (top - 1.0) * ratio
 
     # ---- run --------------------------------------------------------------
     async def run(self) -> None:
