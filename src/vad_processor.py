@@ -158,7 +158,8 @@ class VADProcessor:
             else:
                 self._pre_roll.append(chunk)
 
-            if self._in_speech and sum(len(c) for c in self._speech_buf) >= self.max_speech_samples:
+            # every buffered chunk is exactly one VAD window long
+            if self._in_speech and len(self._speech_buf) * self.window >= self.max_speech_samples:
                 logger.debug("[%s] max speech duration reached, force-cutting utterance", self.route)
                 self._in_speech = False
                 self._iterator.reset_states()

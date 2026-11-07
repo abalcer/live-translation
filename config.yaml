@@ -70,7 +70,7 @@ stt:
   # Swap to "mlx-community/whisper-medium-mlx" for lower latency at slightly lower accuracy.
   model: "mlx-community/whisper-large-v3-turbo"
   language_auto_detect: true
-  languages: ["ru", "ua", "en"]           # used as a hint / fallback when auto-detect is off
+  languages: ["ru", "uk", "en"]           # used as a hint / fallback when auto-detect is off
   temperature: 0.0
   condition_on_previous_text: false  # keep utterances independent -> lower latency, no drift
   # Transcripts in other languages are not translated. Noise and near-silence
@@ -118,7 +118,7 @@ translation:
   keep_alive: "30m"                  # keep the model resident in memory between calls
   direction_map:
     ru: en
-    ua: en
+    uk: en                             # Whisper's code for Ukrainian is "uk"
 
 tts:
   engine: "kokoro"                   # "f5_tts" | "xtts_v2" | "say" | "kokoro"

@@ -25,7 +25,9 @@ import logging
 import signal
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import numpy as np
 
 from src.audio_stream import AudioCapture, AudioPlayer
 from src.stt_transcriber import Transcriber
@@ -40,6 +42,24 @@ logger = logging.getLogger("live-translation.main")
 # Every route translates into English (translation.direction_map), so that is
 # the language the TTS speaks.
 _WARMUP_TEXT = "Testing, one, two, three."
+
+
+def adaptive_speed_factor(adaptive_cfg, queued_s: float) -> float:
+    """
+    Speaking-rate multiplier for the next phrase (config.yaml tts.adaptive_speed),
+    from how much translation is still waiting to be played. English TTS of a
+    translation runs ~1.5x longer than the Russian source at speed 1.0, so
+    continuous speech piles up a backlog; like a human interpreter, speak
+    faster while behind and return to the normal pace once caught up.
+    Linear from 1.0 at start_s to max_factor at full_s.
+    """
+    if not adaptive_cfg or not adaptive_cfg.get("enabled"):
+        return 1.0
+    start = float(adaptive_cfg.get("start_s", 2.0))
+    full = float(adaptive_cfg.get("full_s", 8.0))
+    top = float(adaptive_cfg.get("max_factor", 1.3))
+    ratio = min(1.0, max(0.0, (queued_s - start) / max(full - start, 1e-6)))
+    return 1.0 + (top - 1.0) * ratio
 
 
 @dataclass
@@ -219,61 +239,46 @@ class Pipeline:
             )
 
     async def _tts_stage(self) -> None:
-        loop = asyncio.get_running_loop()
         while True:
             item = await self.translate_out_queue.get()
-            rcfg = self._route_cfg[item.route]
             player = self.players[item.route]
-            speed = self._speed_factor(player.queued_seconds)
-            try:
-                audio = await loop.run_in_executor(
-                    self._tts_executor,
-                    self.voice_cloner.synthesize,
-                    item.text, item.lang, rcfg["voice_reference"], rcfg.get("voice_reference_text", ""),
-                    speed,
-                )
-            except Exception:
-                logger.exception("[%s] TTS failed on utterance #%d", item.route, item.utterance_id)
+            speed = adaptive_speed_factor(self.cfg.tts.get("adaptive_speed"), player.queued_seconds)
+            audio = await self._voice(item, speed)
+            if audio is None:
                 continue
-            item.tracker.mark("tts")
-            if self.voice_converter is not None and audio.size:
-                try:
-                    audio = await loop.run_in_executor(
-                        self._tts_executor, self.voice_converter.convert, audio
-                    )
-                except Exception:
-                    # Better to be heard in the plain TTS voice than not at all.
-                    logger.exception("[%s] RVC failed on utterance #%d - playing unconverted TTS",
-                                     item.route, item.utterance_id)
-                item.tracker.mark("vc")
             # Translation still playing ahead of this phrase = extra delay the
             # listener waits on top of TOTAL. Growing values mean you speak
             # faster than the translation can be voiced.
             ahead_s = player.queued_seconds
-            if audio.size:
-                player.play(audio)
+            player.play(audio)
             logger.info(item.tracker.report(
                 extra=f'QUEUE {ahead_s:4.1f}s | SPEED {speed:.2f}x | "{item.text}"'))
             if ahead_s > self.cfg.pipeline.get("queue_warn_s", 8.0):
                 logger.warning("[%s] translation is %.1fs behind - pause briefly to let it catch up",
                                item.route, ahead_s)
 
-    def _speed_factor(self, queued_s: float) -> float:
-        """
-        Speaking-rate multiplier for the next phrase, from how much translation
-        is still waiting to be played. English TTS of a translation runs ~1.5x
-        longer than the Russian source at speed 1.0, so continuous speech piles
-        up a backlog; like a human interpreter, speak faster while behind and
-        return to the normal pace once caught up. Linear from 1.0 at
-        tts.adaptive_speed.start_s to max_factor at full_s.
-        """
-        ad = self.cfg.tts.get("adaptive_speed") or {}
-        if not ad.get("enabled"):
-            return 1.0
-        start, full = float(ad.get("start_s", 2.0)), float(ad.get("full_s", 8.0))
-        top = float(ad.get("max_factor", 1.3))
-        ratio = min(1.0, max(0.0, (queued_s - start) / max(full - start, 1e-6)))
-        return 1.0 + (top - 1.0) * ratio
+    async def _voice(self, item: TranslateResult, speed: float) -> Optional[np.ndarray]:
+        """TTS (+ optional RVC) for one translation; None if synthesis failed."""
+        loop = asyncio.get_running_loop()
+        rcfg = self._route_cfg[item.route]
+        try:
+            audio = await loop.run_in_executor(
+                self._tts_executor, self.voice_cloner.synthesize,
+                item.text, item.lang, rcfg["voice_reference"], rcfg.get("voice_reference_text", ""), speed,
+            )
+        except Exception:
+            logger.exception("[%s] TTS failed on utterance #%d", item.route, item.utterance_id)
+            return None
+        item.tracker.mark("tts")
+        if self.voice_converter is not None and audio.size:
+            try:
+                audio = await loop.run_in_executor(self._tts_executor, self.voice_converter.convert, audio)
+            except Exception:
+                # Better to be heard in the plain TTS voice than not at all.
+                logger.exception("[%s] RVC failed on utterance #%d - playing unconverted TTS",
+                                 item.route, item.utterance_id)
+            item.tracker.mark("vc")
+        return audio
 
     # ---- run --------------------------------------------------------------
     async def run(self) -> None:
