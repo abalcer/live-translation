@@ -53,7 +53,11 @@ vad:
   sampling_rate: 16000
   window_size_samples: 512        # Silero's native chunk size at 16kHz - do not change without changing sample_rate
   threshold: 0.5                   # speech probability trigger (0..1)
-  min_speech_duration_ms: 250
+  min_speech_duration_ms: 250     # shorter segments (clicks, taps) are dropped before STT
+  min_rms_db: -50                  # quieter segments (breaths, background) are dropped before STT;
+                                   # dBFS of the loudest 10% of 30 ms frames. Dropped segments are
+                                   # logged with their level - raise towards your speech level
+                                   # (log_level DEBUG shows it for kept ones) if noise still gets through
   min_silence_duration_ms: 350     # silence required to close/finalize an utterance
   max_speech_duration_s: 15        # force-cut runaway utterances
   speech_pad_ms: 200                # padding added around detected speech
@@ -67,6 +71,25 @@ stt:
   languages: ["ru", "ua", "en"]           # used as a hint / fallback when auto-detect is off
   temperature: 0.0
   condition_on_previous_text: false  # keep utterances independent -> lower latency, no drift
+  # Transcripts in other languages are not translated. Noise and near-silence
+  # are almost always "heard" as English ("Thank you."), and the remote side's
+  # English leaking from speakers into the mic is dropped too. Whisper codes:
+  # ru = Russian, uk = Ukrainian. [] = accept everything.
+  accept_languages: ["ru", "uk"]
+  # Transcripts equal to one of these are dropped (a trailing " *" also drops
+  # anything that starts with it): whisper-large-v3-turbo hallucinates them
+  # on silence/noise with full confidence. Case and punctuation are ignored.
+  drop_phrases:
+    - "продолжение следует"
+    - "спасибо за просмотр"
+    - "спасибо за внимание"
+    - "субтитры сделал *"
+    - "субтитры создавал *"
+    - "субтитры подготовил *"
+    - "редактор субтитров *"
+    - "дякую за перегляд"
+    - "thanks for watching"
+    - "thank you for watching"
 
 translation:
   engine: "ollama"

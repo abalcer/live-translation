@@ -180,6 +180,10 @@ class Pipeline:
             utt.tracker.mark("stt")
             if not text.strip():
                 continue
+            reason = self.transcriber.reject_reason(text, lang)
+            if reason:
+                logger.info("[%s] dropped STT(%s) %r: %s", utt.route, lang, text, reason)
+                continue
             logger.info("[%s] STT(%s): %s", utt.route, lang, text)
             await self.stt_out_queue.put(
                 SttResult(route=utt.route, utterance_id=utt.utterance_id, text=text, lang=lang, tracker=utt.tracker)

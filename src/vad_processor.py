@@ -18,6 +18,21 @@ from src.utils import LatencyTracker
 logger = logging.getLogger("live-translation.vad")
 
 
+def speech_level_db(audio: np.ndarray, sampling_rate: int) -> float:
+    """
+    Loudness of the speech part of a segment, in dBFS: the 90th percentile of
+    30 ms frame RMS, so the VAD's silence padding does not drag it down.
+    """
+    frame = max(1, int(0.03 * sampling_rate))
+    n = len(audio) // frame
+    if n == 0:
+        rms = np.sqrt(np.mean(np.square(audio))) if len(audio) else 0.0
+    else:
+        frames = audio[: n * frame].reshape(n, frame)
+        rms = np.percentile(np.sqrt(np.mean(np.square(frames), axis=1)), 90)
+    return float(20 * np.log10(rms + 1e-10))
+
+
 @dataclass
 class Utterance:
     route: str
@@ -44,6 +59,11 @@ class VADProcessor:
         self.sampling_rate = cfg.vad.sampling_rate
         self.window = cfg.vad.window_size_samples
         self.max_speech_samples = int(cfg.vad.max_speech_duration_s * self.sampling_rate)
+        # Gates against Silero firing on clicks, breaths and background noise:
+        # whisper-large-v3-turbo "hears" e.g. "Thank you." in near-silence and
+        # reports no_speech_prob ~0, so this has to be stopped before STT.
+        self.min_speech_samples = int(cfg.vad.get("min_speech_duration_ms", 0) * self.sampling_rate / 1000)
+        self.min_rms_db = cfg.vad.get("min_rms_db")
 
         self._model = None
         self._iterator = None
@@ -65,11 +85,29 @@ class VADProcessor:
         )
         logger.info("[%s] Silero VAD loaded", self.route)
 
+    def _reject_reason(self, audio: np.ndarray) -> Optional[str]:
+        """Why a VAD segment is not worth transcribing, or None to keep it."""
+        if len(audio) < self.min_speech_samples:
+            return (f"too short ({len(audio) * 1000 // self.sampling_rate} ms "
+                    f"< {self.cfg.vad.min_speech_duration_ms} ms)")
+        if self.min_rms_db is not None:
+            level = speech_level_db(audio, self.sampling_rate)
+            if level < self.min_rms_db:
+                return f"too quiet ({level:.0f} dB < {self.min_rms_db} dB)"
+        return None
+
     def _emit(self) -> None:
         if not self._speech_buf:
             return
         audio = np.concatenate(self._speech_buf)
         self._speech_buf = []
+        reason = self._reject_reason(audio)
+        if reason:
+            logger.info("[%s] dropped VAD segment: %s", self.route, reason)
+            return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[%s] VAD segment kept: %d ms, %.0f dB", self.route,
+                         len(audio) * 1000 // self.sampling_rate, speech_level_db(audio, self.sampling_rate))
         self._utterance_counter += 1
 
         tracker = LatencyTracker(self.route, self._utterance_counter)
