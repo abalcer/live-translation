@@ -7,8 +7,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Deque, List, Optional
 
 import numpy as np
 import torch
@@ -64,6 +65,15 @@ class VADProcessor:
         # reports no_speech_prob ~0, so this has to be stopped before STT.
         self.min_speech_samples = int(cfg.vad.get("min_speech_duration_ms", 0) * self.sampling_rate / 1000)
         self.min_rms_db = cfg.vad.get("min_rms_db")
+        # Silero fires a little after the real onset - noticeably so for speech
+        # played through a speaker, where the first word ("Сигнальный звонок",
+        # "К правому") was lost. Keep the last pre_roll_ms of non-speech audio
+        # and prepend it on "start". It only holds audio received after the
+        # previous utterance ended, so nothing is transcribed twice.
+        pre_roll_ms = cfg.vad.get("pre_roll_ms", 0)
+        self._pre_roll: Deque[np.ndarray] = deque(
+            maxlen=max(1, int(pre_roll_ms * self.sampling_rate / 1000 / self.window)) if pre_roll_ms else 0
+        )
 
         self._model = None
         self._iterator = None
@@ -101,6 +111,7 @@ class VADProcessor:
             return
         audio = np.concatenate(self._speech_buf)
         self._speech_buf = []
+        self._pre_roll.clear()
         reason = self._reject_reason(audio)
         if reason:
             logger.info("[%s] dropped VAD segment: %s", self.route, reason)
@@ -135,7 +146,8 @@ class VADProcessor:
             if event is not None and "start" in event:
                 self._in_speech = True
                 self._speech_start_t = time.perf_counter()
-                self._speech_buf = [chunk]
+                self._speech_buf = [*self._pre_roll, chunk]
+                self._pre_roll.clear()
             elif event is not None and "end" in event:
                 if self._in_speech:
                     self._speech_buf.append(chunk)
@@ -143,6 +155,8 @@ class VADProcessor:
                 self._emit()
             elif self._in_speech:
                 self._speech_buf.append(chunk)
+            else:
+                self._pre_roll.append(chunk)
 
             if self._in_speech and sum(len(c) for c in self._speech_buf) >= self.max_speech_samples:
                 logger.debug("[%s] max speech duration reached, force-cutting utterance", self.route)

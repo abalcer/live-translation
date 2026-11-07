@@ -61,6 +61,8 @@ vad:
   min_silence_duration_ms: 350     # silence required to close/finalize an utterance
   max_speech_duration_s: 15        # force-cut runaway utterances
   speech_pad_ms: 200                # padding added around detected speech
+  pre_roll_ms: 500                 # audio kept from just before the VAD fires and prepended to
+                                   # the utterance, so the first word is not clipped
 
 stt:
   engine: "mlx_whisper"
@@ -76,6 +78,13 @@ stt:
   # English leaking from speakers into the mic is dropped too. Whisper codes:
   # ru = Russian, uk = Ukrainian. [] = accept everything.
   accept_languages: ["ru", "uk"]
+  # When Whisper detects another language, the phrase is re-transcribed as
+  # ru/uk if that language's probability is at least this high (+~1.2 s for
+  # that phrase only). Speech through a speaker is sometimes misdetected:
+  # "Магазин не работал" came out as Czech, a quiet "а запечатанное личное
+  # письмо" as English with p(ru) = 0.18. Forced-ru noise mostly turns into
+  # "Продолжение следует..." (dropped below); English echo has p(ru) = 0.00.
+  min_accept_prob: 0.1
   # Transcripts equal to one of these are dropped (a trailing " *" also drops
   # anything that starts with it): whisper-large-v3-turbo hallucinates them
   # on silence/noise with full confidence. Case and punctuation are ignored.

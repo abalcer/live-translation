@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -26,6 +26,7 @@ class Transcriber:
         self.model_repo = cfg.stt.model
         self._mlx_whisper = None
         self.accept_languages = set(cfg.stt.get("accept_languages") or [])
+        self.min_accept_prob = float(cfg.stt.get("min_accept_prob", 0.1))
         # "phrase *" drops anything starting with the phrase (subtitle credits
         # followed by a name); plain entries drop only an exact match.
         phrases = cfg.stt.get("drop_phrases") or []
@@ -37,28 +38,61 @@ class Transcriber:
         import mlx_whisper
         self._mlx_whisper = mlx_whisper
         dummy = np.zeros(16000, dtype=np.float32)  # 1s of silence
-        self.transcribe(dummy)
+        self._run(dummy, None)
+        self._language_probs(dummy)
         logger.info("mlx-whisper ready: %s", self.model_repo)
 
     def transcribe(self, audio: np.ndarray) -> Tuple[str, str]:
-        """Returns (text, detected_language_code)."""
+        """Returns (text, language_code)."""
         if self._mlx_whisper is None:
             raise RuntimeError("Transcriber.load() must be called before transcribe()")
 
+        audio = np.asarray(audio, dtype=np.float32)
+        forced = None if self.cfg.stt.language_auto_detect else self.cfg.stt.languages[0]
+        text, lang = self._run(audio, forced)
+        if forced is None and self.accept_languages and lang not in self.accept_languages:
+            # Speech played through a speaker or with a bad mic is sometimes
+            # detected as another language ("Магазин не работал" -> cs, a quiet
+            # phrase -> en with p(ru) = 0.18) and would be dropped. Retry it in
+            # the most likely accepted language unless that is implausible
+            # (English echo: p(ru) = 0.00). Noise that slips through mostly
+            # becomes a known hallucination and is dropped by reject_reason().
+            probs = self._language_probs(audio)
+            best = max(self.accept_languages, key=lambda code: probs.get(code, 0.0))
+            p_best = probs.get(best, 0.0)
+            if p_best >= self.min_accept_prob:
+                logger.info("re-transcribing as %s: detected %s, p(%s)=%.2f", best, lang, best, p_best)
+                text, lang = self._run(audio, best)
+            else:
+                logger.debug("detected %s, best accepted %s p=%.2f < %.2f",
+                             lang, best, p_best, self.min_accept_prob)
+        return text, lang
+
+    def _run(self, audio: np.ndarray, language: Optional[str]) -> Tuple[str, str]:
         kwargs = dict(
             path_or_hf_repo=self.model_repo,
             temperature=self.cfg.stt.temperature,
             condition_on_previous_text=self.cfg.stt.condition_on_previous_text,
             fp16=True,
-            verbose=False,
+            verbose=None,  # None = no "Detected language" line / progress bar
         )
-        if not self.cfg.stt.language_auto_detect:
-            kwargs["language"] = self.cfg.stt.languages[0]
-
-        result = self._mlx_whisper.transcribe(np.asarray(audio, dtype=np.float32), **kwargs)
+        if language:
+            kwargs["language"] = language
+        result = self._mlx_whisper.transcribe(audio, **kwargs)
         text = (result.get("text") or "").strip()
-        lang = result.get("language") or self.cfg.stt.languages[0]
-        return text, lang
+        return text, result.get("language") or language or self.cfg.stt.languages[0]
+
+    def _language_probs(self, audio: np.ndarray) -> Dict[str, float]:
+        """Whisper's language distribution for the first 30 s (one encoder pass, ~0.4 s)."""
+        import mlx.core as mx
+        from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+        from mlx_whisper.transcribe import ModelHolder
+
+        model = ModelHolder.get_model(self.model_repo, mx.float16)
+        mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)
+        segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
+        _, probs = model.detect_language(segment)
+        return probs
 
     def reject_reason(self, text: str, lang: str) -> Optional[str]:
         """
@@ -67,7 +101,8 @@ class Transcriber:
         whisper-large-v3-turbo hallucinates on silence/noise ("Thank you.",
         "Продолжение следует...", subtitle credits) with no_speech_prob ~0 and
         a normal avg_logprob, so its own confidence scores cannot catch it.
-        Noise is almost always detected as "en", hence the language filter.
+        Noise is almost always detected as "en", hence the language filter
+        (transcribe() has already retried plausible ru/uk speech).
         """
         norm = _normalize(text)
         if not norm:

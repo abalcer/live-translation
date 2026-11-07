@@ -137,7 +137,10 @@ class Pipeline:
         devices = self.cfg.audio.devices
         for route in self.routes:
             name = route["name"]
-            frame_q: asyncio.Queue = asyncio.Queue(maxsize=self.cfg.pipeline.max_queue_size)
+            # Unbounded: max_queue_size (8 blocks = 256 ms of audio) would make the
+            # capture callback drop microphone frames whenever the event loop
+            # stalls for a moment. The VAD consumer is fast and catches up.
+            frame_q: asyncio.Queue = asyncio.Queue()
             self.frame_queues[name] = frame_q
 
             self.captures[name] = AudioCapture(
