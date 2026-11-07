@@ -1,14 +1,15 @@
 """
 Audio I/O layer: device discovery plus threaded capture/playback around
 sounddevice (PortAudio), bridging blocking audio-thread callbacks into the
-asyncio pipeline via a ring buffer / thread-safe queue hand-off.
+asyncio pipeline via a playback queue / thread-safe queue hand-off.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
-from typing import Optional
+from collections import deque
+from typing import Deque, Optional
 
 import numpy as np
 import sounddevice as sd
@@ -39,61 +40,59 @@ def find_device_index(name_substr: str, kind: str = "input") -> int:
     return matches[0]
 
 
-class RingBuffer:
-    """Thread-safe float32 mono ring buffer used to smooth TTS playback.
+class PlaybackQueue:
+    """Thread-safe, unbounded FIFO of float32 mono chunks for TTS playback.
 
-    The audio-thread callback reads from it at a fixed cadence; the pipeline
-    writes synthesized chunks into it whenever they become ready. Reads past
-    the write position return silence (zero-padding) instead of blocking or
-    raising, which is exactly what you want from a realtime audio callback.
+    The pipeline appends whole synthesized phrases; the realtime audio
+    callback reads fixed-size blocks across chunk boundaries. Reads past the
+    end return silence (zero-padding) instead of blocking or raising, which is
+    exactly what you want from a realtime audio callback.
+
+    Unbounded on purpose: the previous 8 s ring buffer cut the start off any
+    translation longer than that and overwrote unplayed audio once the
+    backlog exceeded it. Phrases must play in full and in order.
     """
 
-    def __init__(self, capacity_samples: int):
-        self._buf = np.zeros(capacity_samples, dtype=np.float32)
-        self._capacity = capacity_samples
-        self._write = 0
-        self._read = 0
-        self._filled = 0
+    def __init__(self):
+        self._chunks: Deque[np.ndarray] = deque()
+        self._offset = 0      # samples of _chunks[0] already played
+        self._queued = 0      # samples not yet played
         self._lock = threading.Lock()
 
-    def write(self, data: np.ndarray) -> None:
+    @property
+    def queued_samples(self) -> int:
         with self._lock:
-            n = len(data)
-            if n > self._capacity:
-                data = data[-self._capacity:]
-                n = len(data)
-            end = self._write + n
-            if end <= self._capacity:
-                self._buf[self._write:end] = data
-            else:
-                first = self._capacity - self._write
-                self._buf[self._write:] = data[:first]
-                self._buf[: end - self._capacity] = data[first:]
-            self._write = end % self._capacity
-            self._filled = min(self._capacity, self._filled + n)
+            return self._queued
+
+    def write(self, data: np.ndarray) -> None:
+        if not len(data):
+            return
+        with self._lock:
+            self._chunks.append(np.array(data, dtype=np.float32, copy=True))
+            self._queued += len(data)
 
     def clear(self) -> None:
         """Drop all buffered audio (used to cut off playback on a barge-in)."""
         with self._lock:
-            self._write = 0
-            self._read = 0
-            self._filled = 0
+            self._chunks.clear()
+            self._offset = 0
+            self._queued = 0
 
     def read(self, n: int) -> np.ndarray:
+        out = np.zeros(n, dtype=np.float32)
+        filled = 0
         with self._lock:
-            avail = min(n, self._filled)
-            out = np.zeros(n, dtype=np.float32)
-            if avail > 0:
-                end = self._read + avail
-                if end <= self._capacity:
-                    out[:avail] = self._buf[self._read:end]
-                else:
-                    first = self._capacity - self._read
-                    out[:first] = self._buf[self._read:]
-                    out[first:avail] = self._buf[: end - self._capacity]
-                self._read = end % self._capacity
-                self._filled -= avail
-            return out  # zero-padded (silence) on underrun
+            while filled < n and self._chunks:
+                chunk = self._chunks[0]
+                take = min(n - filled, len(chunk) - self._offset)
+                out[filled:filled + take] = chunk[self._offset:self._offset + take]
+                filled += take
+                self._offset += take
+                if self._offset == len(chunk):
+                    self._chunks.popleft()
+                    self._offset = 0
+            self._queued -= filled
+        return out  # zero-padded (silence) on underrun
 
 
 class AudioCapture:
@@ -148,23 +147,23 @@ class AudioCapture:
 class AudioPlayer:
     """
     Opens a PortAudio OutputStream on `device_name` and streams from a
-    RingBuffer so synthesized TTS chunks can be pushed in without blocking
+    PlaybackQueue so synthesized TTS chunks can be pushed in without blocking
     (or being blocked by) realtime playback.
     """
 
     def __init__(self, device_name: str, sample_rate: int, blocksize: int,
-                 channels: int = 1, buffer_seconds: float = 8.0):
+                 channels: int = 1):
         self.device_index = find_device_index(device_name, "output")
         self.sample_rate = sample_rate
         self.blocksize = blocksize
         self.channels = channels
-        self.ring = RingBuffer(int(sample_rate * buffer_seconds))
+        self.queue = PlaybackQueue()
         self._stream: Optional[sd.OutputStream] = None
 
     def _callback(self, outdata, frames, time_info, status) -> None:
         if status:
             logger.debug("playback status: %s", status)
-        chunk = self.ring.read(frames)
+        chunk = self.queue.read(frames)
         if self.channels == 1:
             outdata[:, 0] = chunk
         else:
@@ -186,11 +185,16 @@ class AudioPlayer:
 
     def play(self, audio: np.ndarray) -> None:
         """Enqueue synthesized audio (float32 mono, already at self.sample_rate)."""
-        self.ring.write(np.asarray(audio, dtype=np.float32))
+        self.queue.write(audio)
+
+    @property
+    def queued_seconds(self) -> float:
+        """Audio still waiting to be played (what a new phrase would wait behind)."""
+        return self.queue.queued_samples / self.sample_rate
 
     def clear(self) -> None:
         """Discard everything still queued for playback (barge-in / interruption)."""
-        self.ring.clear()
+        self.queue.clear()
 
     def stop(self) -> None:
         if self._stream is not None:

@@ -61,7 +61,7 @@ class LatencyTracker:
     Tracks wall-clock timestamps for the stages a single utterance passes
     through and renders a compact one-line latency report, e.g.:
 
-        [outgoing_mic_to_meet#17] VAD  612ms | STT  171ms | LLM   94ms | TTS  308ms | TOTAL  573ms | "Привет, как дела?"
+        [outgoing_mic_to_meet#17] VAD  612ms | STT  171ms | LLM   94ms | TTS  308ms | TOTAL  573ms | QUEUE  0.0s | "Hi, how are you?"
 
     Timeline recorded:
         created -> vad -> stt -> llm -> tts [-> vc]

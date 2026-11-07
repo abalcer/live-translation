@@ -240,9 +240,17 @@ class Pipeline:
                     logger.exception("[%s] RVC failed on utterance #%d - playing unconverted TTS",
                                      item.route, item.utterance_id)
                 item.tracker.mark("vc")
+            player = self.players[item.route]
+            # Translation still playing ahead of this phrase = extra delay the
+            # listener waits on top of TOTAL. Growing values mean you speak
+            # faster than the translation can be voiced.
+            ahead_s = player.queued_seconds
             if audio.size:
-                self.players[item.route].play(audio)
-            logger.info(item.tracker.report(extra=f'"{item.text}"'))
+                player.play(audio)
+            logger.info(item.tracker.report(extra=f'QUEUE {ahead_s:4.1f}s | "{item.text}"'))
+            if ahead_s > self.cfg.pipeline.get("queue_warn_s", 8.0):
+                logger.warning("[%s] translation is %.1fs behind - pause briefly to let it catch up",
+                               item.route, ahead_s)
 
     # ---- run --------------------------------------------------------------
     async def run(self) -> None:

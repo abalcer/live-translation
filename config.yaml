@@ -166,6 +166,9 @@ tts:
 
 pipeline:
   max_queue_size: 8
+  # Warn when a new translation has to wait behind more than this many seconds
+  # of already queued playback (the QUEUE column of the latency log).
+  queue_warn_s: 8.0
   log_level: "INFO"
   worker_threads:
     stt: 1          # keep at 1: a single Metal/MPS context should not be hit concurrently
