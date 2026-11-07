@@ -37,6 +37,10 @@ from src.voice_converter import VoiceConverter
 
 logger = logging.getLogger("live-translation.main")
 
+# Every route translates into English (translation.direction_map), so that is
+# the language the TTS speaks.
+_WARMUP_TEXT = "Testing, one, two, three."
+
 
 @dataclass
 class SttResult:
@@ -120,8 +124,11 @@ class Pipeline:
             seen.add(ref)
             logger.info("Warming up TTS voice reference: %s", ref)
             try:
+                # Warm up in the language the TTS will actually speak: a Russian
+                # phrase through an English-only engine (Kokoro) only produces
+                # phonemizer "words count mismatch" warnings.
                 self.voice_cloner.synthesize(
-                    "Проверка связи.", "ru", ref, route.get("voice_reference_text", "")
+                    _WARMUP_TEXT, "en", ref, route.get("voice_reference_text", "")
                 )
             except Exception:
                 logger.exception("TTS warm-up failed for %s", ref)
