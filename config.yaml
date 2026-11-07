@@ -70,12 +70,19 @@ stt:
 
 translation:
   engine: "ollama"
-  endpoint: "http://localhost:11434/api/generate"
-  model: "qwen2.5:7b-instruct"   # only model currently pulled (`ollama list`);
-                                  # `ollama pull qwen3.5:9b` first if you want that one instead
+  endpoint: "http://192.168.0.100:11434/api/generate"   # Ollama on the PC (RTX 5070 Ti)
+  model: "translategemma:12b"      # best quality in bench_translate.py on the PC
+  # Alternatives (`ollama pull <name>` on the PC first; compare with bench_translate.py):
+  #model: "qwen2.5:7b-instruct"
+  #model: "gemma3:12b"
+  #model: "qwen3.5:9b"
   timeout_s: 60
   temperature: 0.1
   num_predict: 256
+  # Context window. Without it Ollama sizes the KV cache from free VRAM (up to 64k
+  # tokens), which can push the model partly onto the CPU and make it 3-5x slower.
+  # A single utterance plus the context hints needs well under 1k tokens.
+  num_ctx: 4096
   keep_alive: "30m"                  # keep the model resident in memory between calls
   direction_map:
     ru: en

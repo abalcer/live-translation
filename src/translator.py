@@ -128,6 +128,7 @@ class Translator:
             "options": {
                 "temperature": self.cfg.translation.temperature,
                 "num_predict": self.cfg.translation.num_predict,
+                "num_ctx": self.cfg.translation.get("num_ctx", 4096),
             },
         }
         resp = requests.post(self.endpoint, json=payload, timeout=self.timeout)

@@ -67,6 +67,7 @@ def call(cfg, model: str, system: str, prompt: str) -> dict:
         "options": {
             "temperature": cfg.translation.temperature,
             "num_predict": cfg.translation.num_predict,
+            "num_ctx": cfg.translation.get("num_ctx", 4096),
         },
     }
     t0 = time.perf_counter()
