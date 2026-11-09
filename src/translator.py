@@ -65,6 +65,44 @@ SYSTEM_PROMPTS = {
     ),
 }
 
+# translation.style "concise": the spoken English must keep pace with the
+# speaker, so the interpreter compresses instead of rendering every word.
+# Measured with translategemma:12b + Kokoro on the same phrases: -16% audio on
+# conversational speech with fillers, -8% on dense narration; mistral-nemo
+# compressed more but turned telegraphic ("Strict gray suit like uniform")
+# and dropped content.
+CONCISE_PROMPTS = {
+    "ru_to_en": (
+        "You are a professional simultaneous interpreter working live on a "
+        "video call. Your translation is spoken aloud by a TTS voice and must "
+        "keep pace with the speaker, so translate the user's Russian or "
+        "Ukrainian text into SHORT, natural spoken English.\n"
+        "STRICT RULES:\n"
+        "- Output ONLY the translation. No quotes, no notes, no explanations, "
+        "no 'Translation:' prefix, no meta-commentary of any kind.\n"
+        "- Keep the full meaning: every fact, name, number, negation and the "
+        "speaker's intent and tone.\n"
+        "- Compress like a real simultaneous interpreter: drop filler words, "
+        "hedges and repetitions; prefer short, common words and simple "
+        "sentence structure; merge or shorten clauses when the meaning "
+        "survives.\n"
+        "- The English must not be longer than the source text.\n"
+        "- Never add information that is not in the source.\n"
+        "- If the input is a sentence fragment, translate it as a fragment.\n"
+        "- Keep names, numbers and technical terms unchanged.\n"
+        "- If the input is empty, noise, or a non-lexical filler, output an "
+        "empty string and nothing else."
+    ),
+}
+
+
+def system_prompt(key: str, style: str = "faithful") -> str:
+    """System prompt for a direction key; "concise" falls back to faithful where undefined."""
+    if style == "concise" and key in CONCISE_PROMPTS:
+        return CONCISE_PROMPTS[key]
+    return SYSTEM_PROMPTS[key]
+
+
 DIRECTION_KEY = {
     ("ru", "en"): "ru_to_en",
     ("ua", "en"): "ru_to_en",   # Whisper reports Ukrainian as "ua"/"uk";
@@ -88,6 +126,7 @@ class Translator:
         self.model = cfg.translation.model
         self.timeout = cfg.translation.timeout_s
         self.direction_map = dict(cfg.translation.direction_map)
+        self.style = cfg.translation.get("style", "faithful")
         self._executor = ThreadPoolExecutor(
             max_workers=cfg.pipeline.worker_threads.translation,
             thread_name_prefix="translate",
@@ -101,7 +140,7 @@ class Translator:
 
     def _build_prompt(self, text: str, src_lang: str, tgt_lang: str) -> Tuple[str, str]:
         key = DIRECTION_KEY.get((src_lang, tgt_lang), "ru_to_en")
-        system = SYSTEM_PROMPTS[key]
+        system = system_prompt(key, self.style)
 
         context_block = ""
         if self._context:

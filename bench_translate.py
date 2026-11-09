@@ -37,7 +37,7 @@ import time
 
 import requests
 
-from src.translator import _THINK_BLOCK, DIRECTION_KEY, SYSTEM_PROMPTS
+from src.translator import _THINK_BLOCK, DIRECTION_KEY, system_prompt
 from src.utils import load_config
 
 # Mix of short/long, RU/UA, fragments, numbers and terms - typical call speech.
@@ -90,7 +90,7 @@ def call(cfg, model: str, system: str, prompt: str) -> dict:
 def build(cfg, lang: str, text: str):
     tgt = dict(cfg.translation.direction_map).get(lang, "en")
     key = DIRECTION_KEY.get((lang, tgt), "ru_to_en")
-    return SYSTEM_PROMPTS[key], f"Text to translate:\n{text}"
+    return system_prompt(key, cfg.translation.get("style", "faithful")), f"Text to translate:\n{text}"
 
 
 def load_phrases(path: str | None, default_lang: str):

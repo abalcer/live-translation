@@ -105,6 +105,11 @@ translation:
   engine: "ollama"
   endpoint: "http://192.168.0.100:11434/api/generate"   # Ollama on the PC (RTX 5070 Ti)
   model: "translategemma:12b"      # best quality in bench_translate.py on the PC
+  # "concise"  - compress like a simultaneous interpreter (drop fillers, hedges,
+  #              repetitions) so the spoken English keeps pace with the speaker:
+  #              -16% TTS audio on conversational speech, -8% on dense narration.
+  # "faithful" - render every word (English TTS then runs ~1.1-1.5x the source).
+  style: "concise"
   # Alternatives (`ollama pull <name>` on the PC first; compare with bench_translate.py):
   #model: "qwen2.5:7b-instruct"
   #model: "gemma3:12b"
