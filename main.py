@@ -10,6 +10,10 @@ Pipeline per route:
 The RVC stage is optional (config.yaml tts.voice_conversion.enabled) and runs
 in the same TTS worker thread, right after synthesis.
 
+STT and TTS+RVC can run on the PC's GPU instead (config.yaml remote.stt /
+remote.tts, server: inference_server.py); this machine then only captures,
+runs the VAD and plays the result.
+
 Stages run as independent asyncio tasks connected by asyncio.Queue, so while
 utterance N is being synthesized, utterance N+1 is already being
 transcribed - true pipeline execution instead of one long blocking chain.
@@ -23,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -30,7 +35,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.audio_stream import AudioCapture, AudioPlayer
-from src.stt_transcriber import Transcriber
+from src.remote_client import RemoteSession, RemoteTranscriber, RemoteVoice
+from src.stt_transcriber import create_transcriber
 from src.translator import Translator
 from src.tts_cloner import VoiceCloner
 from src.utils import LatencyTracker, load_config, setup_logging
@@ -99,10 +105,18 @@ class Pipeline:
         self._route_cfg = {r["name"]: r for r in self.routes}
         self._any_speaking = any(r.get("speak", True) for r in self.routes)
 
-        self.transcriber = Transcriber(cfg)
+        remote_cfg = cfg.get("remote") or {}
+        session = RemoteSession(cfg) if remote_cfg.get("stt") or remote_cfg.get("tts") else None
+        self.transcriber = (RemoteTranscriber(cfg, session) if remote_cfg.get("stt")
+                            else create_transcriber(cfg))
         self.translator = Translator(cfg)
-        self.voice_cloner = VoiceCloner(cfg, transcribe_fn=self.transcriber.transcribe)
-        self.voice_converter = VoiceConverter.from_config(cfg)
+        # Remote TTS covers RVC too (the server applies tts.voice_conversion).
+        self.remote_voice = RemoteVoice(cfg, session) if remote_cfg.get("tts") else None
+        self.voice_cloner = None
+        self.voice_converter = None
+        if self.remote_voice is None:
+            self.voice_cloner = VoiceCloner(cfg, transcribe_fn=self.transcriber.transcribe)
+            self.voice_converter = VoiceConverter.from_config(cfg)
 
         self._stt_executor = ThreadPoolExecutor(
             max_workers=cfg.pipeline.worker_threads.stt, thread_name_prefix="stt"
@@ -116,7 +130,9 @@ class Pipeline:
     def load_models(self) -> None:
         logger.info("Loading models (first run can take a while - downloading weights)...")
         self.transcriber.load()
-        if self._any_speaking:
+        if self._any_speaking and self.remote_voice is not None:
+            self.remote_voice.load()  # the server warmed its models up at startup
+        elif self._any_speaking:
             self.voice_cloner.load()
             self._warmup_tts()
             if self.voice_converter is not None:
@@ -259,6 +275,8 @@ class Pipeline:
 
     async def _voice(self, item: TranslateResult, speed: float) -> Optional[np.ndarray]:
         """TTS (+ optional RVC) for one translation; None if synthesis failed."""
+        if self.remote_voice is not None:
+            return await self._voice_remote(item, speed)
         loop = asyncio.get_running_loop()
         rcfg = self._route_cfg[item.route]
         try:
@@ -278,6 +296,27 @@ class Pipeline:
                 logger.exception("[%s] RVC failed on utterance #%d - playing unconverted TTS",
                                  item.route, item.utterance_id)
             item.tracker.mark("vc")
+        return audio
+
+    async def _voice_remote(self, item: TranslateResult, speed: float) -> Optional[np.ndarray]:
+        """TTS + RVC in one request to inference_server.py."""
+        loop = asyncio.get_running_loop()
+        rcfg = self._route_cfg[item.route]
+        try:
+            audio, vc_s = await loop.run_in_executor(
+                self._tts_executor, self.remote_voice.synthesize,
+                item.text, item.lang, rcfg["voice_reference"], rcfg.get("voice_reference_text", ""), speed,
+            )
+        except Exception:
+            logger.exception("[%s] remote TTS failed on utterance #%d", item.route, item.utterance_id)
+            return None
+        done = time.perf_counter()
+        if vc_s is None:
+            item.tracker.mark_at("tts", done)
+        else:
+            # Network time is counted in TTS; VC is the server-side RVC time.
+            item.tracker.mark_at("tts", done - vc_s)
+            item.tracker.mark_at("vc", done)
         return audio
 
     # ---- run --------------------------------------------------------------

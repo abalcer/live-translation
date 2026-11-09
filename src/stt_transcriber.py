@@ -1,7 +1,13 @@
 """
-mlx-whisper based speech-to-text, tuned for short utterances on Apple Silicon
-(Metal backend via MLX). Stateless per call by design - it is meant to run
-inside a thread-pool executor so the asyncio pipeline never blocks on it.
+Whisper speech-to-text, tuned for short utterances. Two backends, selected by
+config.yaml `stt.engine` (see create_transcriber()):
+
+  - "mlx_whisper"    : mlx-whisper on Apple Silicon (Metal via MLX).
+  - "faster_whisper" : faster-whisper (CTranslate2) on an NVIDIA GPU - used by
+                       inference_server.py on the PC.
+
+Stateless per call by design - it is meant to run inside a thread-pool
+executor so the asyncio pipeline never blocks on it.
 """
 from __future__ import annotations
 
@@ -20,7 +26,19 @@ def _normalize(text: str) -> str:
     return _NON_WORD.sub(" ", text.lower()).strip()
 
 
+def create_transcriber(cfg) -> "Transcriber":
+    """Transcriber for cfg.stt.engine ("remote" is handled by src.remote_client)."""
+    engine = cfg.stt.get("engine", "mlx_whisper")
+    if engine == "mlx_whisper":
+        return Transcriber(cfg)
+    if engine == "faster_whisper":
+        return FasterWhisperTranscriber(cfg)
+    raise ValueError(f"Unknown stt.engine in config.yaml: {engine!r}")
+
+
 class Transcriber:
+    """mlx-whisper backend; also holds the language retry and drop filters."""
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.model_repo = cfg.stt.model
@@ -44,7 +62,7 @@ class Transcriber:
 
     def transcribe(self, audio: np.ndarray) -> Tuple[str, str]:
         """Returns (text, language_code)."""
-        if self._mlx_whisper is None:
+        if not self._loaded():
             raise RuntimeError("Transcriber.load() must be called before transcribe()")
 
         audio = np.asarray(audio, dtype=np.float32)
@@ -67,6 +85,9 @@ class Transcriber:
                 logger.debug("detected %s, best accepted %s p=%.2f < %.2f",
                              lang, best, p_best, self.min_accept_prob)
         return text, lang
+
+    def _loaded(self) -> bool:
+        return self._mlx_whisper is not None
 
     def _run(self, audio: np.ndarray, language: Optional[str]) -> Tuple[str, str]:
         kwargs = dict(
@@ -115,3 +136,50 @@ class Transcriber:
             if norm == prefix or norm.startswith(prefix + " "):
                 return f"known Whisper hallucination ({prefix!r} ...)"
         return None
+
+
+class FasterWhisperTranscriber(Transcriber):
+    """
+    faster-whisper (CTranslate2) backend for an NVIDIA GPU. stt.model is a
+    faster-whisper model name ("large-v3-turbo") or a CTranslate2 repo/path;
+    stt.device / stt.compute_type pick the GPU and precision.
+
+    A detection pass already returns the whole language distribution, so the
+    retry in transcribe() reuses it instead of running the encoder again.
+    """
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self._model = None
+        self._last_probs: Dict[str, float] = {}
+
+    def load(self) -> None:
+        from faster_whisper import WhisperModel
+
+        device = self.cfg.stt.get("device", "cuda")
+        compute_type = self.cfg.stt.get("compute_type", "float16")
+        self._model = WhisperModel(self.model_repo, device=device, compute_type=compute_type)
+        self._run(np.zeros(16000, dtype=np.float32), None)  # 1s of silence: CUDA kernels, cuDNN
+        logger.info("faster-whisper ready: %s on %s (%s)", self.model_repo, device, compute_type)
+
+    def _loaded(self) -> bool:
+        return self._model is not None
+
+    def _run(self, audio: np.ndarray, language: Optional[str]) -> Tuple[str, str]:
+        segments, info = self._model.transcribe(
+            audio,
+            language=language,
+            temperature=self.cfg.stt.temperature,
+            condition_on_previous_text=self.cfg.stt.condition_on_previous_text,
+            beam_size=1,                # greedy, like mlx-whisper's default
+            without_timestamps=True,
+            vad_filter=False,           # utterances are already cut by Silero VAD
+        )
+        text = "".join(seg.text for seg in segments).strip()
+        if language is None:
+            self._last_probs = dict(info.all_language_probs or [])
+        return text, info.language or language or self.cfg.stt.languages[0]
+
+    def _language_probs(self, audio: np.ndarray) -> Dict[str, float]:
+        # Called by transcribe() right after an auto-detect _run() on the same audio.
+        return self._last_probs

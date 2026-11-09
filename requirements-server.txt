@@ -1,0 +1,22 @@
+# ==============================================================================
+# inference_server.py - GPU inference server on the PC (Windows, NVIDIA RTX 50xx)
+#
+# Install torch FIRST from the CUDA 12.8 index (Blackwell / sm_120 needs
+# PyTorch 2.7+ cu128 builds), then the rest:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements-server.txt
+#
+# RVC runs in Applio's own environment (server.overrides.tts.voice_conversion).
+# ==============================================================================
+
+numpy
+PyYAML>=6.0.1
+soundfile>=0.12.1
+scipy>=1.11.0
+
+# STT (stt.engine = "faster_whisper")
+faster-whisper>=1.1.0
+
+# TTS - only the engine selected in tts.engine is needed
+kokoro>=0.9.4
+# f5-tts>=0.6.2

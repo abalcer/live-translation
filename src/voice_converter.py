@@ -37,6 +37,16 @@ _WORKER_SCRIPT = Path(__file__).resolve().parent / "rvc_worker.py"
 _WORKER_OPTIONS = ("pitch", "index_rate", "protect", "volume_envelope", "f0_method", "embedder")
 
 
+def _default_python(applio_dir: Path) -> Path:
+    """Applio's venv interpreter: setup_rvc.sh (.venv) or Applio's own Windows installer (env)."""
+    candidates = [
+        applio_dir / ".venv" / "bin" / "python",
+        applio_dir / ".venv" / "Scripts" / "python.exe",
+        applio_dir / "env" / "Scripts" / "python.exe",
+    ]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
 class VoiceConverter:
     def __init__(self, cfg):
         self.vc_cfg = cfg.tts.voice_conversion
@@ -57,7 +67,7 @@ class VoiceConverter:
     def load(self) -> None:
         """Start the worker and block until it has loaded and warmed up (~15 s)."""
         applio_dir = Path(self.vc_cfg.applio_dir).resolve()
-        python = Path(self.vc_cfg.get("python") or applio_dir / ".venv" / "bin" / "python")
+        python = Path(self.vc_cfg.get("python") or _default_python(applio_dir))
         model = Path(self.vc_cfg.model).resolve()
         index = Path(self.vc_cfg.index).resolve() if self.vc_cfg.get("index") else None
 

@@ -136,7 +136,7 @@ class VoiceCloner:
         if self.engine_name == "kokoro":
             return self._synthesize_kokoro(text, speed_factor)
 
-        if not Path(reference_wav).exists():
+        if not reference_wav or not Path(reference_wav).is_file():
             raise FileNotFoundError(
                 f"Voice reference sample not found: {reference_wav}\n"
                 "Record ~10-20s of clean speech and place it there (see setup_env.sh)."

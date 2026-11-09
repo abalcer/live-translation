@@ -259,6 +259,43 @@ python main.py
 
 Зупинка: `Ctrl+C`. Під час старту голосовий зразок «прогрівається», тому перша фраза не чекатиме на завантаження.
 
+### Обчислення на PC з RTX 5070 Ti
+
+Розпізнавання (Whisper), синтез і RVC можна перенести на PC з відеокартою NVIDIA. Мак тоді лише захоплює звук із мікрофона, відрізає фрази (VAD) і відтворює переклад у BlackHole: камера, мікрофон і Meet лишаються на Маці. Переклад (Ollama) і так працює на PC.
+
+```
+Mac: мікрофон → VAD → фраза ──LAN──▶ PC: Whisper (faster-whisper, CUDA)
+Mac: текст ─────────────────────────▶ PC: Ollama → переклад
+Mac: BlackHole ◀── відтворення ◀─LAN── PC: TTS → RVC
+```
+
+**На PC (Windows)** — окреме середовище, бо `requirements.txt` містить MLX, якого під Windows немає:
+
+```powershell
+py -3.11 -m venv .venv-server
+.venv-server\Scripts\activate
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements-server.txt
+python inference_server.py
+```
+
+- Налаштування сервера — `config.yaml → server`. Блок `server.overrides` накладається на решту конфігурації лише на PC: там вибрано `faster_whisper` замість `mlx_whisper`, `cuda` замість `mps` і шлях до Applio. Мак при цьому зберігає власні значення.
+- RVC запускається через уже встановлений Applio (`server.overrides.tts.voice_conversion.applio_dir`); інтерпретатор у `env\Scripts` чи `.venv` знаходиться автоматично. Модель RVC має лежати в `models/` на PC.
+- Для F5-TTS і XTTSv2 зразок голосу теж має бути на PC, у `reference/` (Kokoro і `say` його не потребують). `say` на Windows немає.
+- Дозвольте вхідні з'єднання на порт `8765` у брандмауері Windows, коли він запитає, або вручну.
+- `python inference_server.py --no-tts` або `--no-stt` запускає лише один етап.
+
+**На Маці** у `config.yaml → remote` вкажіть адресу PC і що саме виконувати там:
+
+```yaml
+remote:
+  url: "http://192.168.0.100:8765"
+  stt: true    # Whisper на PC
+  tts: true    # TTS + RVC на PC
+```
+
+Якщо `stt` чи `tts` вимкнено, цей етап знову працює на Маці. Колонки лога лишаються ті самі: у `STT` і `TTS` входить і час передавання мережею, а `VC` — це час RVC на сервері. Сервер друкує власний час кожного етапу, тож різниця між ними і є мережевою затримкою. Підключайте PC до мережі кабелем: Wi-Fi додає 10–30 мс і нестабільність на кожен запит.
+
 ### Маршрути
 
 У `config.yaml` → `routes` описано напрямки перекладу. Параметр `speak: false` вимикає озвучення: переклад лише друкується в консолі (зручно для налагодження).
@@ -351,6 +388,8 @@ python gemini_translate.py --model <назва-моделі>      # інша м�
 
 ```
 ├── main.py               # локальний конвеєр перекладу
+├── inference_server.py   # STT і TTS+RVC на GPU PC для main.py (опційно)
+├── requirements-server.txt # залежності сервера (Windows + CUDA)
 ├── gemini_translate.py   # хмарна альтернатива (Gemini Live)
 ├── tts_test.py           # тестування синтезу / клонування голосу
 ├── bench_translate.py    # порівняння моделей перекладу (затримка та якість)
@@ -361,7 +400,8 @@ python gemini_translate.py --model <назва-моделі>      # інша м�
 ├── src/
 │   ├── audio_stream.py   # захоплення й відтворення звуку
 │   ├── vad_processor.py  # виявлення мовлення (Silero VAD)
-│   ├── stt_transcriber.py# розпізнавання (mlx-whisper)
+│   ├── stt_transcriber.py# розпізнавання (mlx-whisper / faster-whisper)
+│   ├── remote_client.py  # клієнт inference_server.py
 │   ├── translator.py     # переклад (Ollama)
 │   ├── tts_cloner.py     # синтез і клонування голосу
 │   ├── voice_converter.py# RVC: ваш тембр поверх TTS (опційно)

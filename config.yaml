@@ -65,7 +65,8 @@ vad:
                                    # the utterance, so the first word is not clipped
 
 stt:
-  engine: "mlx_whisper"
+  engine: "mlx_whisper"              # "mlx_whisper" (Apple Silicon) | "faster_whisper" (NVIDIA/CUDA)
+                                     # ignored on the Mac when remote.stt is true
   # "mlx-community/whisper-large-v3-turbo" - best accuracy/speed tradeoff on M-series.
   # Swap to "mlx-community/whisper-medium-mlx" for lower latency at slightly lower accuracy.
   model: "mlx-community/whisper-large-v3-turbo"
@@ -183,6 +184,20 @@ tts:
     f0_method: "rmvpe"
     embedder: "contentvec"            # must match the embedder the model was trained with
 
+# ------------------------------------------------------------------------------
+# Remote GPU stages. main.py sends each utterance to inference_server.py on
+# the PC (RTX 5070 Ti) instead of running the model on the Mac; the Mac then
+# only captures, runs the VAD and plays the result into BlackHole.
+#   stt: true - Whisper on the PC (faster-whisper, see server.overrides.stt)
+#   tts: true - TTS + RVC on the PC (tts.engine / tts.voice_conversion apply there)
+# Start the server first: python inference_server.py (on the PC).
+# ------------------------------------------------------------------------------
+remote:
+  url: "http://192.168.0.100:8765"
+  stt: true
+  tts: true
+  timeout_s: 30
+
 pipeline:
   max_queue_size: 8
   # Warn when a new translation has to wait behind more than this many seconds
@@ -193,6 +208,26 @@ pipeline:
     stt: 1          # keep at 1: a single Metal/MPS context should not be hit concurrently
     translation: 2   # Ollama can comfortably serve a couple of concurrent requests
     tts: 1           # keep at 1 for the same reason as stt
+
+# ------------------------------------------------------------------------------
+# inference_server.py (runs on the PC only). `overrides` is deep-merged over the
+# settings above on the PC, so the Mac keeps its own values for local fallback.
+# ------------------------------------------------------------------------------
+server:
+  host: "0.0.0.0"                    # listen on the LAN; allow the port in Windows Firewall
+  port: 8765
+  overrides:
+    stt:
+      engine: "faster_whisper"
+      model: "large-v3-turbo"        # faster-whisper name or a CTranslate2 repo/path
+      device: "cuda"
+      compute_type: "float16"        # "int8_float16" = less VRAM, slightly faster
+    tts:
+      device: "cuda"
+      voice_conversion:
+        # Applio installed with its own Windows installer (interpreter in env\Scripts
+        # is found automatically); same commit as pinned in setup_rvc.sh.
+        applio_dir: "D:/workspace/applio"
 
 paths:
   models_dir: "models"

@@ -51,7 +51,7 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
         stream=sys.stdout,
     )
     # Silence noisy third-party loggers so pipeline logs stay readable.
-    for noisy in ("urllib3", "httpx", "numba", "TTS", "matplotlib"):
+    for noisy in ("urllib3", "httpx", "httpx2", "huggingface_hub", "numba", "TTS", "matplotlib"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     return logging.getLogger("live-translation")
 
@@ -85,6 +85,10 @@ class LatencyTracker:
 
     def mark(self, stage: str) -> None:
         self._t[stage] = time.perf_counter()
+
+    def mark_at(self, stage: str, t: float) -> None:
+        """Stamp a stage at an earlier perf_counter() time (stages timed on a remote server)."""
+        self._t[stage] = t
 
     def _delta_ms(self, a: str, b: str) -> float:
         if a not in self._t or b not in self._t:
