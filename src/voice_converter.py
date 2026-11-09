@@ -34,7 +34,8 @@ logger = logging.getLogger("live-translation.vc")
 _WORKER_SCRIPT = Path(__file__).resolve().parent / "rvc_worker.py"
 # config.yaml keys forwarded to the worker as --flags; unset keys fall back
 # to the worker's own defaults.
-_WORKER_OPTIONS = ("pitch", "index_rate", "protect", "volume_envelope", "f0_method", "embedder")
+_WORKER_OPTIONS = ("pitch", "index_rate", "protect", "volume_envelope", "f0_method", "embedder",
+                   "warmup_max_s")
 
 
 def _default_python(applio_dir: Path) -> Path:

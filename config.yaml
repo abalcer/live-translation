@@ -228,6 +228,10 @@ server:
         # Applio installed with its own Windows installer (interpreter in env\Scripts
         # is found automatically); same commit as pinned in setup_rvc.sh.
         applio_dir: "D:/workspace/applio"
+        # Longest phrase (s) warmed up at startup; the worker's default is 12. The
+        # first longer phrase took ~1.1 s instead of ~0.7 s in RVC. English TTS of
+        # a 15 s utterance (vad.max_speech_duration_s) runs up to ~20 s.
+        warmup_max_s: 20
 
 paths:
   models_dir: "models"
