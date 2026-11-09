@@ -193,12 +193,17 @@ tts:
 # Remote GPU stages. main.py sends each utterance to inference_server.py on
 # the PC (RTX 5070 Ti) instead of running the model on the Mac; the Mac then
 # only captures, runs the VAD and plays the result into BlackHole.
-#   stt: true - Whisper on the PC (faster-whisper, see server.overrides.stt)
-#   tts: true - TTS + RVC on the PC (tts.engine / tts.voice_conversion apply there)
+#   pipeline: true - STT -> translation -> TTS -> RVC in ONE request per
+#                    utterance (translation.* and tts.* apply on the PC);
+#                    stt / tts below are then ignored
+#   stt: true      - only Whisper on the PC (faster-whisper, see server.overrides.stt)
+#   tts: true      - only TTS + RVC on the PC (tts.engine / tts.voice_conversion apply there)
 # Start the server first: python inference_server.py (on the PC).
 # ------------------------------------------------------------------------------
 remote:
   url: "http://192.168.0.100:8765"
+  pipeline: true
+  max_in_flight: 3                   # utterances on the server at once (pipelined stages)
   stt: true
   tts: true
   timeout_s: 30
@@ -227,6 +232,8 @@ server:
       model: "large-v3-turbo"        # faster-whisper name or a CTranslate2 repo/path
       device: "cuda"
       compute_type: "float16"        # "int8_float16" = less VRAM, slightly faster
+    translation:
+      endpoint: "http://localhost:11434/api/generate"   # Ollama on the same PC
     tts:
       device: "cuda"
       voice_conversion:

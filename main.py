@@ -10,9 +10,11 @@ Pipeline per route:
 The RVC stage is optional (config.yaml tts.voice_conversion.enabled) and runs
 in the same TTS worker thread, right after synthesis.
 
-STT and TTS+RVC can run on the PC's GPU instead (config.yaml remote.stt /
-remote.tts, server: inference_server.py); this machine then only captures,
-runs the VAD and plays the result.
+The models can run on the PC's GPU instead (server: inference_server.py);
+this machine then only captures, runs the VAD and plays the result:
+  - remote.pipeline: STT -> translation -> TTS -> RVC in one request per
+    utterance (up to remote.max_in_flight utterances on the server at once);
+  - remote.stt / remote.tts: single stages, translation from here to Ollama.
 
 Stages run as independent asyncio tasks connected by asyncio.Queue, so while
 utterance N is being synthesized, utterance N+1 is already being
@@ -35,7 +37,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.audio_stream import AudioCapture, AudioPlayer
-from src.remote_client import RemoteSession, RemoteTranscriber, RemoteVoice
+from src.remote_client import RemotePipeline, RemoteSession, RemoteTranscriber, RemoteVoice
 from src.stt_transcriber import create_transcriber
 from src.translator import Translator
 from src.tts_cloner import VoiceCloner
@@ -106,17 +108,31 @@ class Pipeline:
         self._any_speaking = any(r.get("speak", True) for r in self.routes)
 
         remote_cfg = cfg.get("remote") or {}
-        session = RemoteSession(cfg) if remote_cfg.get("stt") or remote_cfg.get("tts") else None
-        self.transcriber = (RemoteTranscriber(cfg, session) if remote_cfg.get("stt")
-                            else create_transcriber(cfg))
-        self.translator = Translator(cfg)
-        # Remote TTS covers RVC too (the server applies tts.voice_conversion).
-        self.remote_voice = RemoteVoice(cfg, session) if remote_cfg.get("tts") else None
+        use_remote = remote_cfg.get("pipeline") or remote_cfg.get("stt") or remote_cfg.get("tts")
+        session = RemoteSession(cfg) if use_remote else None
+        self.transcriber = None
+        self.translator = None
+        self.remote_voice = None
         self.voice_cloner = None
         self.voice_converter = None
-        if self.remote_voice is None:
-            self.voice_cloner = VoiceCloner(cfg, transcribe_fn=self.transcriber.transcribe)
-            self.voice_converter = VoiceConverter.from_config(cfg)
+        # remote.pipeline: the whole STT -> LLM -> TTS -> RVC chain runs on the
+        # server in one request per utterance; remote.stt / remote.tts are ignored.
+        self.remote_pipeline = RemotePipeline(cfg, session) if remote_cfg.get("pipeline") else None
+        self._remote_out_queue: asyncio.Queue = asyncio.Queue(maxsize=qsize)
+        self._remote_executor = ThreadPoolExecutor(
+            # Up to this many utterances are on the server at once, so STT of the
+            # next one overlaps TTS of the previous (the server locks per stage).
+            max_workers=int(remote_cfg.get("max_in_flight", 3)), thread_name_prefix="remote",
+        )
+        if self.remote_pipeline is None:
+            self.transcriber = (RemoteTranscriber(cfg, session) if remote_cfg.get("stt")
+                                else create_transcriber(cfg))
+            self.translator = Translator(cfg)
+            # Remote TTS covers RVC too (the server applies tts.voice_conversion).
+            self.remote_voice = RemoteVoice(cfg, session) if remote_cfg.get("tts") else None
+            if self.remote_voice is None:
+                self.voice_cloner = VoiceCloner(cfg, transcribe_fn=self.transcriber.transcribe)
+                self.voice_converter = VoiceConverter.from_config(cfg)
 
         self._stt_executor = ThreadPoolExecutor(
             max_workers=cfg.pipeline.worker_threads.stt, thread_name_prefix="stt"
@@ -128,6 +144,9 @@ class Pipeline:
 
     # ---- setup ------------------------------------------------------------
     def load_models(self) -> None:
+        if self.remote_pipeline is not None:
+            self.remote_pipeline.load(speaking=self._any_speaking)  # the server warmed up at startup
+            return
         logger.info("Loading models (first run can take a while - downloading weights)...")
         self.transcriber.load()
         if self._any_speaking and self.remote_voice is not None:
@@ -262,16 +281,73 @@ class Pipeline:
             audio = await self._voice(item, speed)
             if audio is None:
                 continue
-            # Translation still playing ahead of this phrase = extra delay the
-            # listener waits on top of TOTAL. Growing values mean you speak
-            # faster than the translation can be voiced.
-            ahead_s = player.queued_seconds
-            player.play(audio)
-            logger.info(item.tracker.report(
-                extra=f'QUEUE {ahead_s:4.1f}s | SPEED {speed:.2f}x | "{item.text}"'))
-            if ahead_s > self.cfg.pipeline.get("queue_warn_s", 8.0):
-                logger.warning("[%s] translation is %.1fs behind - pause briefly to let it catch up",
-                               item.route, ahead_s)
+            self._play(item.route, item.tracker, audio, item.text, speed)
+
+    def _play(self, route: str, tracker: LatencyTracker, audio: np.ndarray, text: str, speed: float) -> None:
+        player = self.players[route]
+        # Translation still playing ahead of this phrase = extra delay the
+        # listener waits on top of TOTAL. Growing values mean you speak
+        # faster than the translation can be voiced.
+        ahead_s = player.queued_seconds
+        player.play(audio)
+        logger.info(tracker.report(extra=f'QUEUE {ahead_s:4.1f}s | SPEED {speed:.2f}x | "{text}"'))
+        if ahead_s > self.cfg.pipeline.get("queue_warn_s", 8.0):
+            logger.warning("[%s] translation is %.1fs behind - pause briefly to let it catch up",
+                           route, ahead_s)
+
+    # ---- remote.pipeline: one request per utterance ---------------------------
+    async def _remote_submit_stage(self) -> None:
+        """Send each utterance to the server as soon as the VAD closes it."""
+        loop = asyncio.get_running_loop()
+        while True:
+            utt = await self.utterance_queue.get()
+            rcfg = self._route_cfg[utt.route]
+            speak = rcfg.get("speak", True)
+            speed = 1.0
+            if speak:
+                speed = adaptive_speed_factor(self.cfg.tts.get("adaptive_speed"),
+                                              self.players[utt.route].queued_seconds)
+            future = loop.run_in_executor(
+                self._remote_executor, self.remote_pipeline.process, utt.audio, speak, speed,
+                rcfg.get("voice_reference", ""), rcfg.get("voice_reference_text", ""),
+            )
+            # Results are consumed in submission order, so playback order holds
+            # even if a short phrase comes back before a long one.
+            await self._remote_out_queue.put((utt, speak, speed, future))
+
+    async def _remote_play_stage(self) -> None:
+        while True:
+            utt, speak, speed, future = await self._remote_out_queue.get()
+            try:
+                res = await future
+            except Exception:
+                logger.exception("[%s] remote pipeline failed on utterance #%d", utt.route, utt.utterance_id)
+                continue
+            # Stamp the stages backwards from the response with the server's
+            # timings: network and waiting for the server land in the STT column.
+            t = time.perf_counter()
+            if res.vc_ms is not None:
+                utt.tracker.mark_at("vc", t)
+                t -= res.vc_ms / 1000
+            utt.tracker.mark_at("tts", t)
+            t -= res.tts_ms / 1000
+            utt.tracker.mark_at("llm", t)
+            utt.tracker.mark_at("stt", t - res.llm_ms / 1000)
+
+            if not res.text.strip():
+                continue
+            if res.dropped:
+                logger.info("[%s] dropped STT(%s) %r: %s", utt.route, res.lang, res.text, res.dropped)
+                continue
+            logger.info("[%s] STT(%s): %s", utt.route, res.lang, res.text)
+            if not res.translation.strip():
+                continue
+            logger.info("[%s] LLM(%s): %s", utt.route, res.tgt_lang, res.translation)
+            if not speak:
+                logger.info(utt.tracker.report(extra=f'"{res.translation}"'))
+                continue
+            if res.audio.size:
+                self._play(utt.route, utt.tracker, res.audio, res.translation, speed)
 
     async def _voice(self, item: TranslateResult, speed: float) -> Optional[np.ndarray]:
         """TTS (+ optional RVC) for one translation; None if synthesis failed."""
@@ -328,9 +404,13 @@ class Pipeline:
 
         for route in self.routes:
             self._tasks.append(asyncio.create_task(self._vad_stage(route["name"]), name=f"vad:{route['name']}"))
-        self._tasks.append(asyncio.create_task(self._stt_stage(), name="stt"))
-        self._tasks.append(asyncio.create_task(self._translate_stage(), name="translate"))
-        self._tasks.append(asyncio.create_task(self._tts_stage(), name="tts"))
+        if self.remote_pipeline is not None:
+            self._tasks.append(asyncio.create_task(self._remote_submit_stage(), name="remote-submit"))
+            self._tasks.append(asyncio.create_task(self._remote_play_stage(), name="remote-play"))
+        else:
+            self._tasks.append(asyncio.create_task(self._stt_stage(), name="stt"))
+            self._tasks.append(asyncio.create_task(self._translate_stage(), name="translate"))
+            self._tasks.append(asyncio.create_task(self._tts_stage(), name="tts"))
 
         logger.info("Pipeline running. Active routes: %s", ", ".join(r["name"] for r in self.routes))
         await asyncio.gather(*self._tasks)
@@ -345,6 +425,7 @@ class Pipeline:
             self.voice_converter.close()
         self._stt_executor.shutdown(wait=False)
         self._tts_executor.shutdown(wait=False)
+        self._remote_executor.shutdown(wait=False)
 
 
 async def amain() -> None:

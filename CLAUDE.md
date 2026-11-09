@@ -9,7 +9,7 @@
 
 Дві незалежні реалізації:
 - **`main.py`** — локальний конвеєр: Silero VAD → mlx-whisper → Ollama → TTS із клонуванням голосу.
-- **`inference_server.py`** — HTTP-сервер для PC з RTX 5070 Ti (Windows, CUDA): виконує STT (faster-whisper) і TTS+RVC для `main.py`, якщо в `config.yaml → remote` увімкнено `stt`/`tts`. Мак тоді лише захоплює звук, запускає VAD і відтворює результат. Сервер читає той самий `config.yaml`, поверх якого накладається `server.overrides`.
+- **`inference_server.py`** — HTTP-сервер для PC з RTX 5070 Ti (Windows, CUDA): з `config.yaml → remote.pipeline` виконує весь ланцюжок STT → переклад (Ollama) → TTS → RVC одним запитом `POST /translate` на фразу; з `remote.stt`/`remote.tts` — окремі етапи. Мак тоді лише захоплює звук, запускає VAD і відтворює результат. Сервер читає той самий `config.yaml`, поверх якого накладається `server.overrides`.
 - **`gemini_translate.py`** — хмарна альтернатива: один потік Gemini Live API (`gemini-3.5-live-translate-preview`). Читає `config.yaml → gemini:` (через `src.utils.load_config`), прапорці CLI мають пріоритет. Аудіо через PyAudio (не sounddevice), з власним потоковим `LinearResampler` 24 кГц → частота вихідного пристрою. Виводить у BlackHole 2ch, тоді як `main.py` — у BlackHole 16ch.
 
 ## Команди
@@ -45,7 +45,7 @@ AudioCapture → VADProcessor → [Utterance] → STT → [SttResult] → Transl
 - `src/audio_stream.py` — захоплення й відтворення через sounddevice з кільцевим буфером. Пристрої шукаються за підрядком назви, без урахування регістру.
 - `src/vad_processor.py` — Silero VAD; вікно 512 семплів при 16 кГц змінювати не можна.
 - `src/stt_transcriber.py` — `create_transcriber()` за `stt.engine`: `mlx_whisper` (Mac) або `faster_whisper` (CUDA, на сервері). Повертає `(text, lang)`; повтор розпізнавання як ru/uk і фільтри галюцинацій — у базовому `Transcriber`.
-- `src/remote_client.py` — `RemoteTranscriber` і `RemoteVoice`: ті самі етапи через HTTP до `inference_server.py`; формат обміну описано в docstring модуля.
+- `src/remote_client.py` — `RemotePipeline` (`/translate`), `RemoteTranscriber` і `RemoteVoice` (окремі етапи) через HTTP до `inference_server.py`; формат обміну описано в docstring модуля. У режимі `remote.pipeline` `main.py` замість етапів STT/Translate/TTS запускає `_remote_submit_stage` (до `remote.max_in_flight` запитів паралельно) і `_remote_play_stage` (відповіді в порядку фраз).
 - `src/translator.py` — HTTP-запит до Ollama `/api/generate`; напрям перекладу береться з `translation.direction_map`.
 - `src/tts_cloner.py` — `VoiceCloner` з рушіями `f5_tts` | `xtts_v2` (клонують голос) і `say` | `kokoro` (без клонування).
   Для F5-TTS потрібен транскрипт зразка: якщо `voice_reference_text` порожній, він береться з `reference/<ім'я>.txt`, а якщо файлу немає — генерується через STT і зберігається туди ж.
@@ -66,4 +66,4 @@ AudioCapture → VADProcessor → [Utterance] → STT → [SttResult] → Transl
 - **Ніколи не комітити** `.env`, `reference/` (зразок голосу користувача — біометричні дані), `logs/`, `models/` (зокрема модель RVC з голосом користувача), `vendor/`, `*.wav`. Усе це вже є в `.gitignore`.
 - Документація для користувача (`README.md`) пишеться українською, коментарі в коді — як у файлі, який редагуєш: у `src/`, `main.py` і `config.yaml` англійською, у `gemini_translate.py` українською.
 - Додаючи новий TTS-рушій, оновлюй `VoiceCloner.load()` і `synthesize()`, коментар `tts.engine` у `config.yaml` і таблицю в README.
-- `main.py` і захоплення/відтворення звуку орієнтовані лише на macOS/Apple Silicon (MLX, MPS, CoreAudio, BlackHole). Виняток — `inference_server.py` і все, що він імпортує (`stt_transcriber`, `tts_cloner`, `voice_converter`, `rvc_worker`, `utils`): цей код має працювати і на Windows з CUDA, тому не імпортуй у ньому MLX чи sounddevice на рівні модуля.
+- `main.py` і захоплення/відтворення звуку орієнтовані лише на macOS/Apple Silicon (MLX, MPS, CoreAudio, BlackHole). Виняток — `inference_server.py` і все, що він імпортує (`stt_transcriber`, `translator`, `tts_cloner`, `voice_converter`, `rvc_worker`, `utils`): цей код має працювати і на Windows з CUDA, тому не імпортуй у ньому MLX чи sounddevice на рівні модуля.

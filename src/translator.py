@@ -177,16 +177,19 @@ class Translator:
 
     async def translate(self, text: str, src_lang: str) -> Tuple[str, str]:
         """Returns (translated_text, target_lang). Empty text in -> empty text out."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, self.translate_sync, text, src_lang)
+
+    def translate_sync(self, text: str, src_lang: str) -> Tuple[str, str]:
+        """Blocking translate() for callers that already run in a worker thread (inference_server.py)."""
         text = text.strip()
         tgt_lang = self._target_lang(src_lang)
         if not text:
             return "", tgt_lang
 
         system, prompt = self._build_prompt(text, src_lang, tgt_lang)
-
-        loop = asyncio.get_running_loop()
         try:
-            translated = await loop.run_in_executor(self._executor, self._call_ollama, system, prompt)
+            translated = self._call_ollama(system, prompt)
         except requests.RequestException as exc:
             logger.error("Ollama request failed (%s): %s", self.endpoint, exc)
             return "", tgt_lang

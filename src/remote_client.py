@@ -1,11 +1,24 @@
 """
-Client side of inference_server.py: STT and TTS (+ RVC) run on the PC's GPU
-while this machine only captures, cuts utterances (VAD) and plays the result.
-Enabled per stage by config.yaml `remote.stt` / `remote.tts`.
+Client side of inference_server.py: the models run on the PC's GPU while this
+machine only captures, cuts utterances (VAD) and plays the result.
+
+  - config.yaml `remote.pipeline`: STT -> translation -> TTS -> RVC in a single
+    request per utterance (RemotePipeline).
+  - `remote.stt` / `remote.tts`: single stages (RemoteTranscriber,
+    RemoteVoice); translation then goes from this machine to Ollama.
 
 Wire format (HTTP/1.1 keep-alive, one request per utterance):
 
-    GET  /health -> JSON {"stt": ..., "tts": ..., "vc": bool, "sample_rate": int}
+    GET  /health -> JSON {"stt": ..., "tts": ..., "translate": ..., "vc": bool,
+                          "sample_rate": int}
+    POST /translate?speak=1&speed=1.0&voice_reference=...&voice_reference_text=...
+                 body: mono float32 LE samples at 16 kHz
+                 -> uint32 LE n, n bytes of UTF-8 JSON
+                      {"text", "lang", "dropped" (reason or null),
+                       "translation", "tgt_lang",
+                       "stt_ms", "llm_ms", "tts_ms", "vc_ms" (null if no RVC)},
+                    then mono float32 LE samples at tts.sample_rate
+                    (none if dropped, empty translation or speak=0)
     POST /stt    body: mono float32 LE samples at 16 kHz
                  -> JSON {"text", "lang", "server_ms"}
     POST /tts    body: JSON {"text", "lang", "speed_factor",
@@ -19,9 +32,12 @@ transfer adds only a few milliseconds per stage.
 """
 from __future__ import annotations
 
+import json
 import logging
+import struct
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import numpy as np
@@ -142,3 +158,66 @@ class RemoteVoice:
         logger.debug("remote TTS: server tts %s ms, vc %s ms, round trip %.0f ms",
                      resp.headers.get("X-TTS-Ms"), vc_ms, (time.perf_counter() - t0) * 1000)
         return audio, (float(vc_ms) / 1000.0 if vc_ms is not None else None)
+
+
+@dataclass
+class PipelineResult:
+    """One utterance through POST /translate."""
+    text: str
+    lang: str
+    dropped: Optional[str]       # why STT output was not translated, or None
+    translation: str
+    tgt_lang: str
+    stt_ms: float
+    llm_ms: float
+    tts_ms: float
+    vc_ms: Optional[float]       # None if RVC did not run
+    audio: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+
+
+class RemotePipeline:
+    """STT -> translation -> TTS -> RVC on the server in one request per utterance."""
+
+    def __init__(self, cfg, session: RemoteSession):
+        self.sample_rate = cfg.tts.sample_rate
+        self.session = session
+
+    def load(self, speaking: bool) -> None:
+        info = self.session.health()
+        if not info.get("stt") or not info.get("translate"):
+            raise RemoteError(f"inference server {self.session.url} has no STT/translation loaded")
+        if speaking and not info.get("tts"):
+            raise RemoteError(f"inference server {self.session.url} has no TTS loaded")
+        if speaking and info.get("sample_rate") != self.sample_rate:
+            raise RemoteError(
+                f"tts.sample_rate mismatch: server {info.get('sample_rate')} Hz, "
+                f"local {self.sample_rate} Hz (AudioPlayer is opened at the local rate)"
+            )
+        logger.info("Remote pipeline ready at %s: STT %s -> %s -> %s%s", self.session.url,
+                    info["stt"], info["translate"], info.get("tts") or "text only",
+                    " + RVC" if info.get("vc") else "")
+
+    def process(self, audio: np.ndarray, speak: bool, speed_factor: float = 1.0,
+                voice_reference: str = "", voice_reference_text: str = "") -> PipelineResult:
+        params = {"speak": "1" if speak else "0", "speed": f"{speed_factor:.3f}"}
+        if voice_reference:
+            params["voice_reference"] = voice_reference
+        if voice_reference_text:
+            params["voice_reference_text"] = voice_reference_text
+        resp = self.session.request(
+            "POST", "/translate", params=params,
+            data=np.ascontiguousarray(audio, dtype="<f4").tobytes(),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        body = resp.content
+        (n,) = struct.unpack_from("<I", body, 0)
+        meta = json.loads(body[4:4 + n].decode("utf-8"))
+        out = np.frombuffer(body[4 + n:], dtype="<f4").astype(np.float32)
+        return PipelineResult(
+            text=meta.get("text", ""), lang=meta.get("lang", ""), dropped=meta.get("dropped"),
+            translation=meta.get("translation", ""), tgt_lang=meta.get("tgt_lang", ""),
+            stt_ms=float(meta.get("stt_ms") or 0.0), llm_ms=float(meta.get("llm_ms") or 0.0),
+            tts_ms=float(meta.get("tts_ms") or 0.0),
+            vc_ms=float(meta["vc_ms"]) if meta.get("vc_ms") is not None else None,
+            audio=out,
+        )
